@@ -27,7 +27,12 @@
 
     <!-- UI for messages and controls -->
     <div class="p-4 bg-gray-900 text-white shadow-lg z-10 flex flex-col sm:flex-row items-center justify-between rounded-t-xl">
-        <p id="message" class="text-xl font-bold mb-2 sm:mb-0">Please grant location permission to start...</p>
+        <div>
+            <!-- Main status message -->
+            <p id="message" class="text-xl font-bold mb-1">Please grant location permission to start...</p>
+            <!-- Job title displayed below in smaller font -->
+            <p id="job-message" class="text-xs text-gray-400 hidden"></p>
+        </div>
         <div class="flex items-center space-x-2">
             <button
                 id="arrived-button"
@@ -47,6 +52,7 @@
         let vehicleMarker;
         let geofence;
         let isInsideGeofence = false; // Flag to track geofence status
+        let jobTitle;
 
         // Function to parse URL parameters
         function getUrlParams() {
@@ -74,6 +80,7 @@
                     latitude: latitude,
                     longitude: longitude,
                     email: email,
+                    job: jobTitle, // Include the job title in the webhook payload
                     timestamp: new Date().toISOString()
                 };
 
@@ -96,20 +103,29 @@
             if (!geofence || !vehicleMarker) return;
 
             const messageElement = document.getElementById('message');
+            const jobMessageElement = document.getElementById('job-message');
             const point = turf.point([longitude, latitude]);
             const isNowInside = turf.booleanPointInPolygon(point, geofence);
+            
+            // Update the job message text and visibility
+            if (jobTitle && jobTitle !== 'a job') {
+                jobMessageElement.textContent = `Job: ${jobTitle}`;
+                jobMessageElement.classList.remove('hidden');
+            } else {
+                jobMessageElement.classList.add('hidden');
+            }
 
             // Send webhook only on status change (entering or exiting)
             if (isNowInside && !isInsideGeofence) {
                 sendWebhook('inside', email, latitude, longitude);
                 isInsideGeofence = true;
-                messageElement.textContent = 'Vehicle is inside the job location!';
+                messageElement.textContent = `Vehicle is at the job location!`;
             } else if (!isNowInside && isInsideGeofence) {
                 sendWebhook('outside', email, latitude, longitude);
                 isInsideGeofence = false;
-                messageElement.textContent = 'Vehicle has left the job location!';
+                messageElement.textContent = `Vehicle has left the job location!`;
             } else if (!isInsideGeofence) {
-                messageElement.textContent = 'Vehicle is approaching the job location...';
+                messageElement.textContent = `Vehicle is approaching the job location...`;
             }
         }
         
@@ -117,7 +133,7 @@
         function onGeolocationSuccess(pos) {
             const coords = pos.coords;
             const userLocation = new mapboxgl.LngLat(coords.longitude, coords.latitude);
-            const userEmail = getUrlParams().email || 'testexample@example.com';
+            const userEmail = getUrlParams().email || 'testuser@example.com';
             
             // Set the initial position of the vehicle marker
             if (!vehicleMarker) {
@@ -154,15 +170,24 @@
         // Main function to initialize the app
         window.onload = function() {
             // Get URL parameters or use default sample data for testing
-            const { lat, lon, radius } = getUrlParams();
-            const geofenceLat = lat || 33.4958; // Sample latitude (NYC)
-            const geofenceLon = lon || -84.3207; // Sample longitude (NYC)
-            const geofenceRadius = radius || 300; // Sample radius in feet
+            const { lat, lon, radius, job } = getUrlParams();
+            jobTitle = job || 'Sample Job Title'; // Changed 'a job' to 'Sample Job Title'
             
+            const geofenceLat = lat || 40.7128; // Sample latitude (NYC)
+            const geofenceLon = lon || -74.0060; // Sample longitude (NYC)
+            const geofenceRadius = radius || 500; // Sample radius in feet
+
+            // Update the initial message with the job title
+            const jobMessageElement = document.getElementById('job-message');
+            if (jobTitle && jobTitle !== 'a job') {
+                jobMessageElement.textContent = `Job: ${jobTitle}`;
+                jobMessageElement.classList.remove('hidden');
+            }
+
             // Initialize the map
             map = new mapboxgl.Map({
                 container: 'map',
-                style: 'mapbox://styles/mapbox/streets-v12',
+                style: 'mapbox://styles/mapbox/streets-v11',
                 center: [geofenceLon, geofenceLat],
                 zoom: 12
             });
@@ -210,11 +235,11 @@
 
             // Handle "Arrived" button click
             document.getElementById('arrived-button').addEventListener('click', () => {
-                const userEmail = getUrlParams().email || 'testemail@example.com';
+                const userEmail = getUrlParams().email || 'testuser@example.com';
                 const userLocation = vehicleMarker.getLngLat();
                 sendWebhook('complete', userEmail, userLocation.lat, userLocation.lng);
                 
-                document.getElementById('message').textContent = 'Job Complete';
+                document.getElementById('message').textContent = `Job Complete`;
                 
                 // Close the window after a short delay
                 setTimeout(() => {
