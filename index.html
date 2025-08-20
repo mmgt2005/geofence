@@ -30,6 +30,11 @@
             border-radius: 0.5rem;
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
         }
+        /* Highlight the active turn instruction */
+        .mapbox-directions-step-active {
+            background-color: rgba(243, 244, 246, 0.8) !important; /* light gray background */
+            font-weight: bold;
+        }
     </style>
 </head>
 <body class="flex flex-col h-screen">
@@ -66,6 +71,7 @@
         let isInsideGeofence = false; // Flag to track geofence status
         let jobTitle;
         let geofenceLocation; // New variable to store the geofence's location
+        let isInitialLoad = true; // New flag to control initial map centering
 
         // Function to parse URL parameters
         function getUrlParams() {
@@ -138,7 +144,7 @@
                 isInsideGeofence = false;
                 messageElement.textContent = `Vehicle has left the job location!`;
             } else if (!isInsideGeofence) {
-                messageElement.textContent = `Vehicle is approaching the job location...`;
+                messageElement.textContent = `Vehicle is on its way to the job location...`;
             }
         }
 
@@ -158,9 +164,6 @@
                     .setLngLat(userLocation)
                     .addTo(map);
                 
-                // Set the initial map center to the user's location
-                map.setCenter(userLocation);
-                
                 // Show the "Arrived" button
                 document.getElementById('arrived-button').classList.remove('hidden');
                 
@@ -170,7 +173,7 @@
                     unit: 'imperial',
                     profile: 'mapbox/driving',
                     controls: {
-                        inputs: true, // Show search inputs
+                        inputs: false, // Show search inputs
                         instructions: true, // Show turn-by-turn instructions
                         profileSwitcher: true // Show driving/walking/cycling switch
                     }
@@ -182,12 +185,16 @@
                 if (geofenceLocation) {
                     directions.setDestination([geofenceLocation.lng, geofenceLocation.lat]);
                 }
-
             }
 
-            // Update the marker position and re-center the map
+            // Update the marker position
             vehicleMarker.setLngLat(userLocation);
-            map.setCenter(userLocation);
+            
+            // ONLY set the map center on the very first location update
+            if (isInitialLoad) {
+                map.setCenter(userLocation);
+                isInitialLoad = false;
+            }
 
             // Set the origin of the directions to the user's current location
             directions.setOrigin([coords.longitude, coords.latitude]);
