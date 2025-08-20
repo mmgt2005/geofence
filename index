@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Geofence App</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Mapbox GL JS -->
+    <script src="https://api.mapbox.com/mapbox-gl-js/v2.10.0/mapbox-gl.js"></script>
+    <link href="https://api.mapbox.com/mapbox-gl-js/v2.10.0/mapbox-gl.css" rel="stylesheet" />
+    <!-- Turf.js for geofencing logic -->
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        #map {
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body class="flex flex-col h-screen">
+    <!-- Map container -->
+    <div id="map" class="flex-1"></div>
+
+    <!-- UI for messages and controls -->
+    <div class="p-4 bg-gray-900 text-white shadow-lg z-10 flex flex-col sm:flex-row items-center justify-between rounded-t-xl">
+        <p id="message" class="text-xl font-bold mb-2 sm:mb-0">Please grant location permission to start...</p>
+        <div class="flex items-center space-x-2">
+            <button
+                id="arrived-button"
+                class="bg-green-500 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-green-600 transition-colors hidden"
+            >
+                Job Complete
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // Set your Mapbox access token and webhook URL here
+        mapboxgl.accessToken = 'pk.eyJ1IjoibW1ndDIwMDUiLCJhIjoiY21laW4xY2dqMDQ1NDJpcHdqOW1hMDk3ZCJ9.aSTR_k5xhzGJNPPAVAFnlw'; 
+        const WEBHOOK_URL = 'https://go.glideapps.com/api/container/plugin/webhook-trigger/LPCunXsYkOiRLSxXBhSH/5322e093-74bf-4793-92fa-ef5713bf8ab1'; // The URL to send data to
+
+        let map;
+        let vehicleMarker;
+        let geofence;
+        let isInsideGeofence = false; // Flag to track geofence status
+
+        // Function to parse URL parameters
+        function getUrlParams() {
+            const params = {};
+            new URLSearchParams(window.location.search).forEach((value, key) => {
+                // Check if the parameter is a number or a string (for email)
+                if (key === 'lat' || key === 'lon' || key === 'radius') {
+                    params[key] = parseFloat(value);
+                } else {
+                    params[key] = value;
+                }
+            });
+            return params;
+        }
+
+        // Function to send data to the external webhook
+        async function sendWebhook(status, email, latitude, longitude) {
+            if (WEBHOOK_URL === 'YOUR_WEBHOOK_URL' || !WEBHOOK_URL) {
+                console.warn("Webhook URL not configured. Not sending data.");
+                return;
+            }
+            try {
+                const data = {
+                    status: status,
+                    latitude: latitude,
+                    longitude: longitude,
+                    email: email,
+                    timestamp: new Date().toISOString()
+                };
+
+                const response = await fetch(WEBHOOK_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                
+                if (!response.ok) {
+                    console.error('Webhook failed with status:', response.status);
+                }
+            } catch (error) {
+                console.error('Error sending webhook:', error);
+            }
+        }
+
+        // Function to check if the vehicle is inside the geofence
+        function checkGeofence(email, latitude, longitude) {
+            if (!geofence || !vehicleMarker) return;
+
+            const messageElement = document.getElementById('message');
+            const point = turf.point([longitude, latitude]);
+            const isNowInside = turf.booleanPointInPolygon(point, geofence);
+
+            // Send webhook only on status change (entering or exiting)
+            if (isNowInside && !isInsideGeofence) {
+                sendWebhook('inside', email, latitude, longitude);
+                isInsideGeofence = true;
+                messageElement.textContent = 'Vehicle is inside the job location!';
+            } else if (!isNowInside && isInsideGeofence) {
+                sendWebhook('outside', email, latitude, longitude);
+                isInsideGeofence = false;
+                messageElement.textContent = 'Vehicle has left the job location!';
+            } else if (!isInsideGeofence) {
+                messageElement.textContent = 'Vehicle is approaching the job location...';
+            }
+        }
+        
+        // Geolocation success callback
+        function onGeolocationSuccess(pos) {
+            const coords = pos.coords;
+            const userLocation = new mapboxgl.LngLat(coords.longitude, coords.latitude);
+            const userEmail = getUrlParams().email || 'testexample@example.com';
+            
+            // Set the initial position of the vehicle marker
+            if (!vehicleMarker) {
+                const vehicleElement = document.createElement('div');
+                vehicleElement.innerHTML = '🚗';
+                vehicleElement.style.fontSize = '32px';
+                
+                vehicleMarker = new mapboxgl.Marker({ element: vehicleElement })
+                    .setLngLat(userLocation)
+                    .addTo(map);
+                
+                // Set the initial map center to the user's location
+                map.setCenter(userLocation);
+                
+                // Show the "Arrived" button
+                document.getElementById('arrived-button').classList.remove('hidden');
+            }
+
+            // Update the marker position and re-center the map
+            vehicleMarker.setLngLat(userLocation);
+            map.setCenter(userLocation);
+
+            // Check geofence status
+            checkGeofence(userEmail, coords.latitude, coords.longitude);
+        }
+
+        // Geolocation error callback
+        function onGeolocationError(err) {
+            const messageElement = document.getElementById('message');
+            messageElement.textContent = `Geolocation error: ${err.message}`;
+            console.warn(`Geolocation error(${err.code}): ${err.message}`);
+        }
+
+        // Main function to initialize the app
+        window.onload = function() {
+            // Get URL parameters or use default sample data for testing
+            const { lat, lon, radius } = getUrlParams();
+            const geofenceLat = lat || 33.4958; // Sample latitude (NYC)
+            const geofenceLon = lon || -84.3207; // Sample longitude (NYC)
+            const geofenceRadius = radius || 300; // Sample radius in feet
+            
+            // Initialize the map
+            map = new mapboxgl.Map({
+                container: 'map',
+                style: 'mapbox://styles/mapbox/streets-v11',
+                center: [geofenceLon, geofenceLat],
+                zoom: 12
+            });
+
+            map.on('load', () => {
+                // Create a circular geofence using Turf.js
+                const geofenceCenter = [geofenceLon, geofenceLat];
+                geofence = turf.circle(geofenceCenter, geofenceRadius, {
+                    steps: 64,
+                    units: 'feet'
+                });
+
+                // Add the geofence polygon to the map
+                map.addSource('geofence', {
+                    'type': 'geojson',
+                    'data': geofence
+                });
+                map.addLayer({
+                    'id': 'geofence-layer',
+                    'type': 'fill',
+                    'source': 'geofence',
+                    'layout': {},
+                    'paint': {
+                        'fill-color': '#007cbf',
+                        'fill-opacity': 0.3
+                    }
+                });
+
+                // Add a pin for the geofence location
+                new mapboxgl.Marker({ color: '#007cbf' })
+                    .setLngLat(geofenceCenter)
+                    .addTo(map);
+                
+                // Start watching for real-time location changes
+                if (navigator.geolocation) {
+                    navigator.geolocation.watchPosition(
+                        onGeolocationSuccess, 
+                        onGeolocationError, 
+                        { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+                    );
+                } else {
+                    document.getElementById('message').textContent = 'Geolocation is not supported by this browser.';
+                }
+            });
+
+            // Handle "Arrived" button click
+            document.getElementById('arrived-button').addEventListener('click', () => {
+                const userEmail = getUrlParams().email || 'testemail@example.com';
+                const userLocation = vehicleMarker.getLngLat();
+                sendWebhook('complete', userEmail, userLocation.lat, userLocation.lng);
+                
+                document.getElementById('message').textContent = 'Job Complete';
+                
+                // Close the window after a short delay
+                setTimeout(() => {
+                    window.close();
+                }, 1000);
+            });
+        };
+    </script>
+</body>
+</html>
