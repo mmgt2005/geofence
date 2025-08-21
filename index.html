@@ -222,9 +222,7 @@
 
                 // Add an event listener to trigger voice on new route load (after voice is active)
                 directions.on('route', () => {
-                    if (speechActive) {
-                        speakInstructions();
-                    }
+                    // This event listener is no longer needed since we handle it below
                 });
 
                 // Set up the MutationObserver to listen for turn-by-turn instruction changes
@@ -258,6 +256,14 @@
 
             // Set the origin of the directions to the user's current location
             directions.setOrigin([coords.longitude, coords.latitude]);
+
+            // ** FIX: Explicitly call speakInstructions after the first route is loaded **
+            // We use a small delay to ensure the DOM element is ready for the text-to-speech engine.
+            setTimeout(() => {
+                if (speechActive) {
+                    speakInstructions();
+                }
+            }, 500); // 500ms delay to be safe
 
             // Check geofence status
             checkGeofence(userEmail, coords.latitude, coords.longitude);
