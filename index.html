@@ -80,6 +80,7 @@
         let geofenceLocation; // New variable to store the geofence's location
         let isInitialLoad = true; // New flag to control initial map centering
         let lastInstruction = ''; // To prevent repeating the same instruction
+        let speechActive = false; // Flag to enable voice navigation after user interaction
 
         // Function to parse URL parameters
         function getUrlParams() {
@@ -152,15 +153,19 @@
                 isInsideGeofence = false;
                 messageElement.textContent = `Vehicle has left the job location!`;
             } else if (!isInsideGeofence) {
-                messageElement.textContent = `Vehicle is on its way the job location...`;
+                messageElement.textContent = `Vehicle is on its way to the job location...`;
             }
         }
         
         // Function to speak instructions
         function speakInstructions() {
+            // Only speak if voice has been activated
+            if (!speechActive) return;
+
             const instructionsElement = document.querySelector('.mapbox-directions-step-active .mapbox-directions-step-maneuver-instruction');
             if (instructionsElement) {
                 const text = instructionsElement.textContent.trim();
+                // Only speak if the instruction text has changed
                 if (text !== lastInstruction) {
                     const utterance = new SpeechSynthesisUtterance(text);
                     window.speechSynthesis.speak(utterance);
@@ -210,9 +215,35 @@
                     document.getElementById('message').textContent = "Map movement is disabled for this navigation.";
                 });
 
-                // Set the destination of the directions to the geofence location
+                // Set the destination of the directions to the user's current location and the geofence
                 if (geofenceLocation) {
                     directions.setDestination([geofenceLocation.lng, geofenceLocation.lat]);
+                }
+
+                // Add an event listener to trigger voice on new route load (after voice is active)
+                directions.on('route', () => {
+                    if (speechActive) {
+                        speakInstructions();
+                    }
+                });
+
+                // Set up the MutationObserver to listen for turn-by-turn instruction changes
+                const directionsPanel = document.querySelector('.mapboxgl-ctrl-directions-instructions');
+                if (directionsPanel) {
+                    const observer = new MutationObserver((mutations) => {
+                        mutations.forEach((mutation) => {
+                            if (mutation.type === 'attributes' && mutation.attributeName === 'class' && mutation.target.classList.contains('mapbox-directions-step-active')) {
+                                speakInstructions();
+                            }
+                        });
+                    });
+                    
+                    // Start observing the directions panel and its children for class changes
+                    observer.observe(directionsPanel, {
+                        subtree: true,
+                        attributes: true,
+                        attributeFilter: ['class']
+                    });
                 }
             }
 
@@ -304,9 +335,6 @@
                 } else {
                     document.getElementById('message').textContent = 'Geolocation is not supported by this browser.';
                 }
-                
-                // Attach a listener to the directions update event
-                directions.on('route', speakInstructions);
             });
 
             // Handle "Arrived" button click
@@ -325,7 +353,16 @@
             
             // Handle voice button click
             document.getElementById('voice-button').addEventListener('click', () => {
-                speakInstructions();
+                // Toggle voice activation
+                speechActive = !speechActive;
+                const messageElement = document.getElementById('message');
+                if (speechActive) {
+                    messageElement.textContent = 'Voice navigation enabled.';
+                    // Immediately speak the first instruction
+                    speakInstructions(); 
+                } else {
+                    messageElement.textContent = 'Voice navigation disabled.';
+                }
             });
         };
     </script>
