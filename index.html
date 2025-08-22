@@ -4,373 +4,224 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Geofence App</title>
-    <!-- Tailwind CSS for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Mapbox GL JS -->
     <script src="https://api.mapbox.com/mapbox-gl-js/v2.10.0/mapbox-gl.js"></script>
     <link href="https://api.mapbox.com/mapbox-gl-js/v2.10.0/mapbox-gl.css" rel="stylesheet" />
-    <!-- Mapbox Directions Plugin -->
     <script src="https://api.mapbox.com/mapbox-gl-js/plugins/mapbox-gl-directions/v4.1.0/mapbox-gl-directions.js"></script>
     <link rel="stylesheet" href="https://api.mapbox.com/mapbox-gl-js/plugins/mapbox-gl-directions/v4.1.0/mapbox-gl-directions.css" type="text/css" />
-    <!-- Turf.js for geofencing logic -->
     <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
     <style>
-        body {
-            font-family: 'Inter', sans-serif;
-        }
-        #map {
-            width: 100%;
-            height: 100%;
-        }
-        /* Style the directions control for better integration */
+        body { font-family: 'Inter', sans-serif; }
+        #map { width: 100%; height: 100%; }
         .mapboxgl-ctrl-directions {
-            top: 1rem;
-            left: 1rem;
-            right: auto;
+            top: 1rem; left: 1rem; right: auto;
             border-radius: 0.5rem;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1),0 2px 4px -2px rgba(0,0,0,0.1);
         }
-        /* Highlight the active turn instruction with a vibrant blue background */
         .mapbox-directions-step-active {
-            background-color: #007cbf !important; /* Vibrant blue */
-            color: white !important; /* Ensure text is readable */
-            font-weight: 800; /* Even more pronounced font weight */
+            background-color:#007cbf!important; color:white!important; font-weight:800;
         }
     </style>
 </head>
 <body class="flex flex-col h-screen">
-    <!-- Map container -->
     <div id="map" class="flex-1"></div>
-
-    <!-- UI for messages and controls -->
     <div class="p-4 bg-gray-900 text-white shadow-lg z-10 flex flex-col sm:flex-row items-center justify-between rounded-t-xl">
         <div>
-            <!-- Main status message -->
             <p id="message" class="text-xl font-bold mb-1">Please grant location permission to start...</p>
-            <!-- Job title displayed below in smaller font -->
             <p id="job-message" class="text-xs text-gray-400 hidden"></p>
         </div>
         <div class="flex items-center space-x-2">
-            <button
-                id="arrived-button"
-                class="bg-green-500 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-green-600 transition-colors hidden"
-            >
-                Job Complete
-            </button>
-             <button
-                id="voice-button"
-                class="bg-blue-500 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-blue-600 transition-colors"
-            >
-                🗣️
-            </button>
+            <button id="arrived-button" class="bg-green-500 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-green-600 transition-colors hidden">Job Complete</button>
+            <button id="voice-button" class="bg-blue-500 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-blue-600 transition-colors">🗣️</button>
         </div>
     </div>
 
     <script>
-        // Set your Mapbox access token and webhook URL here
-        mapboxgl.accessToken = 'pk.eyJ1IjoibW1ndDIwMDUiLCJhIjoiY21laW4xY2dqMDQ1NDJpcHdqOW1hMDk3ZCJ9.aSTR_k5xhzGJNPPAVAFnlw'; 
-        const WEBHOOK_URL = 'https://go.glideapps.com/api/container/plugin/webhook-trigger/LPCunXsYkOiRLSxXBhSH/5322e093-74bf-4793-92fa-ef5713bf8ab1'; // The URL to send data to
+        mapboxgl.accessToken = 'pk.eyJ1IjoibW1ndDIwMDUiLCJhIjoiY21laW4xY2dqMDQ1NDJpcHdqOW1hMDk3ZCJ9.aSTR_k5xhzGJNPPAVAFnlw';
+        const WEBHOOK_URL = 'https://go.glideapps.com/api/container/plugin/webhook-trigger/LPCunXsYkOiRLSxXBhSH/5322e093-74bf-4793-92fa-ef5713bf8ab1';
 
-        let map;
-        let vehicleMarker;
-        let geofence;
-        let directions;
-        let isInsideGeofence = false; // Flag to track geofence status
-        let jobTitle;
-        let geofenceLocation; // New variable to store the geofence's location
-        let isInitialLoad = true; // New flag to control initial map centering
-        let lastInstruction = ''; // To prevent repeating the same instruction
-        let speechActive = false; // Flag to enable voice navigation after user interaction
+        let map, vehicleMarker, geofence, directions;
+        let isInsideGeofence = false, jobTitle, geofenceLocation;
+        let isInitialLoad = true, lastInstruction = '', speechActive = false;
 
-        // Function to parse URL parameters
+        function initVoices() {
+            let voices = speechSynthesis.getVoices();
+            if (voices.length === 0) {
+                speechSynthesis.onvoiceschanged = () => { voices = speechSynthesis.getVoices(); };
+            }
+        }
+        initVoices();
+
         function getUrlParams() {
             const params = {};
             new URLSearchParams(window.location.search).forEach((value, key) => {
-                // Check if the parameter is a number or a string (for email)
-                if (key === 'lat' || key === 'lon' || key === 'radius') {
-                    params[key] = parseFloat(value);
-                } else {
-                    params[key] = value;
-                }
+                params[key] = (key === 'lat' || key === 'lon' || key === 'radius') ? parseFloat(value) : value;
             });
             return params;
         }
 
-        // Function to send data to the external webhook
-        async function sendWebhook(status, email, latitude, longitude) {
-            if (WEBHOOK_URL === 'YOUR_WEBHOOK_URL' || !WEBHOOK_URL) {
-                console.warn("Webhook URL not configured. Not sending data.");
-                return;
-            }
-            try {
-                const data = {
-                    status: status,
-                    latitude: latitude,
-                    longitude: longitude,
-                    email: email,
-                    job: jobTitle, // Include the job title in the webhook payload
-                    timestamp: new Date().toISOString()
-                };
-
-                const response = await fetch(WEBHOOK_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data)
-                });
-                
-                if (!response.ok) {
-                    console.error('Webhook failed with status:', response.status);
-                }
-            } catch (error) {
-                console.error('Error sending webhook:', error);
-            }
+        async function sendWebhook(status,email,latitude,longitude){
+            if(!WEBHOOK_URL){console.warn("Webhook URL not configured.");return;}
+            try{
+                const data={status,latitude,longitude,email,job:jobTitle,timestamp:new Date().toISOString()};
+                const r=await fetch(WEBHOOK_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+                if(!r.ok)console.error('Webhook failed',r.status);
+            }catch(e){console.error('Error sending webhook:',e);}
         }
 
-        // Function to check if the vehicle is inside the geofence
-        function checkGeofence(email, latitude, longitude) {
-            if (!geofence || !vehicleMarker) return;
+        function checkGeofence(email,latitude,longitude){
+            if(!geofence||!vehicleMarker)return;
+            const msg=document.getElementById('message');
+            const jobMsg=document.getElementById('job-message');
+            const point=turf.point([longitude,latitude]);
+            const inside=turf.booleanPointInPolygon(point,geofence);
+            if(jobTitle&&jobTitle!=='a job'){jobMsg.textContent=`Job: ${jobTitle}`;jobMsg.classList.remove('hidden');}
+            else{jobMsg.classList.add('hidden');}
 
-            const messageElement = document.getElementById('message');
-            const jobMessageElement = document.getElementById('job-message');
-            const point = turf.point([longitude, latitude]);
-            const isNowInside = turf.booleanPointInPolygon(point, geofence);
-            
-            // Update the job message text and visibility
-            if (jobTitle && jobTitle !== 'a job') {
-                jobMessageElement.textContent = `Job: ${jobTitle}`;
-                jobMessageElement.classList.remove('hidden');
-            } else {
-                jobMessageElement.classList.add('hidden');
-            }
-
-            // Send webhook only on status change (entering or exiting)
-            if (isNowInside && !isInsideGeofence) {
-                sendWebhook('inside', email, latitude, longitude);
-                isInsideGeofence = true;
-                messageElement.textContent = `Vehicle is at the job location!`;
-            } else if (!isNowInside && isInsideGeofence) {
-                sendWebhook('outside', email, latitude, longitude);
-                isInsideGeofence = false;
-                messageElement.textContent = `Vehicle has left the job location!`;
-            } else if (!isInsideGeofence) {
-                messageElement.textContent = `Vehicle is on its way to the job location...`;
-            }
+            if(inside&&!isInsideGeofence){sendWebhook('inside',email,latitude,longitude);isInsideGeofence=true;msg.textContent='Vehicle is at the job location!';}
+            else if(!inside&&isInsideGeofence){sendWebhook('outside',email,latitude,longitude);isInsideGeofence=false;msg.textContent='Vehicle has left the job location!';}
+            else if(!isInsideGeofence){msg.textContent='Vehicle is on its way to the job location...';}
         }
-        
-        // Function to speak instructions
-        function speakInstructions() {
-            // Only speak if voice has been activated
-            if (!speechActive) return;
 
-            const instructionsElement = document.querySelector('.mapbox-directions-step-active .mapbox-directions-step-maneuver-instruction');
-            if (instructionsElement) {
-                const text = instructionsElement.textContent.trim();
-                // Only speak if the instruction text has changed
-                if (text !== lastInstruction) {
-                    const utterance = new SpeechSynthesisUtterance(text);
-                    window.speechSynthesis.speak(utterance);
+        function speakText(text){
+            if(!text) return;
+            const utter = new SpeechSynthesisUtterance(text);
+            utter.lang='en-US';
+            utter.rate=1;
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.speak(utter);
+        }
+
+        function speakInstructions(){
+            if(!speechActive) return;
+            const el = document.querySelector('.mapbox-directions-step-active .mapbox-directions-step-maneuver-instruction');
+            if(el){
+                const text = el.textContent.trim();
+                if(text && text !== lastInstruction){
+                    document.getElementById('message').textContent = text;
+                    speakText(text);
                     lastInstruction = text;
                 }
             }
         }
-
-        // Geolocation success callback
-        function onGeolocationSuccess(pos) {
-            const coords = pos.coords;
-            const userLocation = new mapboxgl.LngLat(coords.longitude, coords.latitude);
-            const userEmail = getUrlParams().email || 'testuser@example.com';
-            
-            // Set the initial position of the vehicle marker
-            if (!vehicleMarker) {
-                const vehicleElement = document.createElement('div');
-                vehicleElement.innerHTML = '🚗';
-                vehicleElement.style.fontSize = '32px';
-                
-                vehicleMarker = new mapboxgl.Marker({ element: vehicleElement })
-                    .setLngLat(userLocation)
-                    .addTo(map);
-                
-                // Show the "Arrived" button
-                document.getElementById('arrived-button').classList.remove('hidden');
-                
-                // Add the directions control with the geofence location as the destination
-                directions = new MapboxDirections({
-                    accessToken: mapboxgl.accessToken,
-                    unit: 'imperial',
-                    profile: 'mapbox/driving',
-                    controls: {
-                        inputs: false, // Set this to false to hide the input fields
-                        instructions: true, // Show turn-by-turn instructions
-                        profileSwitcher: false // Show driving/walking/cycling switch
+        
+        // This new function handles getting and speaking the very first instruction.
+        function speakFirstInstruction() {
+            if (speechActive) {
+                setTimeout(() => {
+                    const firstEl = document.querySelector('.mapbox-directions-step-maneuver-instruction');
+                    if (firstEl) {
+                        const text = firstEl.textContent.trim();
+                        if (text) {
+                            document.getElementById('message').textContent = text;
+                            speakText(text);
+                            lastInstruction = text;
+                        }
                     }
-                });
-                
-                map.addControl(directions, 'top-left');
-
-                // Disable map dragging after directions are loaded to prevent marker movement
-                map.dragPan.disable();
-
-                // Add an event listener to inform the user that map movement is disabled
-                map.on('mousedown', (e) => {
-                    document.getElementById('message').textContent = "Map movement is disabled for this navigation.";
-                });
-
-                // Set the destination of the directions to the user's current location and the geofence
-                if (geofenceLocation) {
-                    directions.setDestination([geofenceLocation.lng, geofenceLocation.lat]);
-                }
-
-                // Add an event listener to trigger voice on new route load (after voice is active)
-                directions.on('route', () => {
-                    // This event listener is no longer needed since we handle it below
-                });
-
-                // Set up the MutationObserver to listen for turn-by-turn instruction changes
-                const directionsPanel = document.querySelector('.mapboxgl-ctrl-directions-instructions');
-                if (directionsPanel) {
-                    const observer = new MutationObserver((mutations) => {
-                        mutations.forEach((mutation) => {
-                            if (mutation.type === 'attributes' && mutation.attributeName === 'class' && mutation.target.classList.contains('mapbox-directions-step-active')) {
-                                speakInstructions();
-                            }
-                        });
-                    });
-                    
-                    // Start observing the directions panel and its children for class changes
-                    observer.observe(directionsPanel, {
-                        subtree: true,
-                        attributes: true,
-                        attributeFilter: ['class']
-                    });
-                }
+                }, 500); // allow DOM update
             }
-
-            // Update the marker position
-            vehicleMarker.setLngLat(userLocation);
-            
-            // ONLY set the map center on the very first location update
-            if (isInitialLoad) {
-                map.setCenter(userLocation);
-                isInitialLoad = false;
-            }
-
-            // Set the origin of the directions to the user's current location
-            directions.setOrigin([coords.longitude, coords.latitude]);
-
-            // ** FIX: Explicitly call speakInstructions after the first route is loaded **
-            // We use a small delay to ensure the DOM element is ready for the text-to-speech engine.
-            setTimeout(() => {
-                if (speechActive) {
-                    speakInstructions();
-                }
-            }, 500); // 500ms delay to be safe
-
-            // Check geofence status
-            checkGeofence(userEmail, coords.latitude, coords.longitude);
         }
 
-        // Geolocation error callback
-        function onGeolocationError(err) {
-            const messageElement = document.getElementById('message');
-            messageElement.textContent = `Geolocation error: ${err.message}`;
+        function onGeolocationSuccess(pos){
+            const coords=pos.coords;
+            const userLoc=new mapboxgl.LngLat(coords.longitude,coords.latitude);
+            const userEmail=getUrlParams().email||'testuser@example.com';
+
+            if(!vehicleMarker){
+                const car=document.createElement('div');car.innerHTML='🚗';car.style.fontSize='32px';
+                vehicleMarker=new mapboxgl.Marker({element:car}).setLngLat(userLoc).addTo(map);
+                document.getElementById('arrived-button').classList.remove('hidden');
+
+                directions=new MapboxDirections({accessToken:mapboxgl.accessToken,unit:'imperial',profile:'mapbox/driving',controls:{inputs:false,instructions:true,profileSwitcher:true}});
+                map.addControl(directions,'top-left');
+                map.dragPan.disable();
+                map.on('mousedown',()=>{document.getElementById('message').textContent="Map movement is disabled for this navigation.";});
+                if(geofenceLocation) directions.setDestination([geofenceLocation.lng,geofenceLocation.lat]);
+
+                directions.on('route',()=>{
+                    const voiceButton = document.getElementById('voice-button');
+                    // Add a visual indicator that voice navigation is available
+                    voiceButton.classList.remove('bg-blue-500', 'hover:bg-blue-600');
+                    voiceButton.classList.add('bg-green-500', 'hover:bg-green-600', 'ring-4', 'ring-green-400');
+                    // Display a message to the user
+                    document.getElementById('message').textContent = 'Voice navigation is now ready!';
+
+                    // Now call the new function to speak the first instruction
+                    speakFirstInstruction();
+                });
+
+                const panel=document.querySelector('.mapboxgl-ctrl-directions-instructions');
+                if(panel){
+                    const obs=new MutationObserver(muts=>{
+                        for(const m of muts){
+                            if(m.type==='attributes' && m.attributeName==='class' && m.target.classList && m.target.classList.contains('mapbox-directions-step-active')){
+                                speakInstructions();
+                            }
+                        }
+                    });
+                    obs.observe(panel,{subtree:true,attributes:true,attributeFilter:['class'],childList:true});
+                }
+            }
+            vehicleMarker.setLngLat(userLoc);
+            if(isInitialLoad){ map.setCenter(userLoc); isInitialLoad=false; }
+            directions.setOrigin([coords.longitude,coords.latitude]);
+            checkGeofence(userEmail,coords.latitude,coords.longitude);
+        }
+
+        function onGeolocationError(err){
+            document.getElementById('message').textContent=`Geolocation error: ${err.message}`;
             console.warn(`Geolocation error(${err.code}): ${err.message}`);
         }
 
-        // Main function to initialize the app
-        window.onload = function() {
-            // Get URL parameters or use default sample data for testing
-            const { lat, lon, radius, job } = getUrlParams();
-            jobTitle = job || 'Sample Job Title'; 
-            
-            const geofenceLat = lat || 40.7128; // Sample latitude (NYC)
-            const geofenceLon = lon || -74.0060; // Sample longitude (NYC)
-            const geofenceRadius = radius || 500; // Sample radius in feet
-            geofenceLocation = { lat: geofenceLat, lng: geofenceLon }; // Store geofence location
+        window.onload=function(){
+            const {lat,lon,radius,job}=getUrlParams();
+            jobTitle=job||'Sample Job Title';
+            const geofenceLat=lat||40.7128, geofenceLon=lon||-74.0060, geofenceRadius=radius||500;
+            geofenceLocation={lat:geofenceLat,lng:geofenceLon};
+            const jobMsg=document.getElementById('job-message');
+            if(jobTitle&&jobTitle!=='a job'){ jobMsg.textContent=`Job: ${jobTitle}`; jobMsg.classList.remove('hidden'); }
 
-            // Update the initial message with the job title
-            const jobMessageElement = document.getElementById('job-message');
-            if (jobTitle && jobTitle !== 'a job') {
-                jobMessageElement.textContent = `Job: ${jobTitle}`;
-                jobMessageElement.classList.remove('hidden');
-            }
+            map=new mapboxgl.Map({container:'map',style:'mapbox://styles/mapbox/streets-v12',center:[geofenceLon,geofenceLat],zoom:12});
 
-            // Initialize the map
-            map = new mapboxgl.Map({
-                container: 'map',
-                style: 'mapbox://styles/mapbox/streets-v12',
-                center: [geofenceLon, geofenceLat],
-                zoom: 12
+            map.on('load',()=>{
+                const center=[geofenceLon,geofenceLat];
+                geofence=turf.circle(center,geofenceRadius,{steps:64,units:'feet'});
+                map.addSource('geofence',{type:'geojson',data:geofence});
+                map.addLayer({id:'geofence-layer',type:'fill',source:'geofence',paint:{'fill-color':'#007cbf','fill-opacity':0.3}});
+                new mapboxgl.Marker({color:'#007cbf'}).setLngLat(center).addTo(map);
+                if(navigator.geolocation){ navigator.geolocation.watchPosition(onGeolocationSuccess,onGeolocationError,{enableHighAccuracy:true,timeout:5000,maximumAge:0}); }
+                else{ document.getElementById('message').textContent='Geolocation not supported.'; }
             });
 
-            map.on('load', () => {
-                // Create a circular geofence using Turf.js
-                const geofenceCenter = [geofenceLon, geofenceLat];
-                geofence = turf.circle(geofenceCenter, geofenceRadius, {
-                    steps: 64,
-                    units: 'feet'
-                });
+            document.getElementById('arrived-button').addEventListener('click',()=>{
+                const userEmail=getUrlParams().email||'testuser@example.com';
+                const loc=vehicleMarker.getLngLat();
+                sendWebhook('complete',userEmail,loc.lat,loc.lng);
+                document.getElementById('message').textContent='Job Complete!';
+                setTimeout(()=>{ window.close(); },1000);
+            });
 
-                // Add the geofence polygon to the map
-                map.addSource('geofence', {
-                    'type': 'geojson',
-                    'data': geofence
-                });
-                map.addLayer({
-                    'id': 'geofence-layer',
-                    'type': 'fill',
-                    'source': 'geofence',
-                    'layout': {},
-                    'paint': {
-                        'fill-color': '#007cbf',
-                        'fill-opacity': 0.3
-                    }
-                });
-
-                // Add a pin for the geofence location
-                new mapboxgl.Marker({ color: '#007cbf' })
-                    .setLngLat(geofenceCenter)
-                    .addTo(map);
-                
-                // Start watching for real-time location changes
-                if (navigator.geolocation) {
-                    navigator.geolocation.watchPosition(
-                        onGeolocationSuccess, 
-                        onGeolocationError, 
-                        { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
-                    );
-                } else {
-                    document.getElementById('message').textContent = 'Geolocation is not supported by this browser.';
+            document.getElementById('voice-button').addEventListener('click',()=>{
+                speechActive=!speechActive;
+                const msg=document.getElementById('message');
+                const btn=document.getElementById('voice-button');
+                window.speechSynthesis.cancel();
+                if(speechActive){
+                    // Only say "Voice navigation enabled" once at the beginning
+                    const prime=new SpeechSynthesisUtterance("Voice navigation enabled.");
+                    prime.lang='en-US';
+                    window.speechSynthesis.speak(prime);
+                    msg.textContent='Voice navigation enabled.';
+                    btn.textContent='🔇';
+                    
+                    // Call the new function to speak the first instruction when voice is enabled
+                    speakFirstInstruction();
+                }else{
+                    msg.textContent='Voice navigation disabled.';
+                    btn.textContent='🗣️';
                 }
             });
-
-            // Handle "Arrived" button click
-            document.getElementById('arrived-button').addEventListener('click', () => {
-                const userEmail = getUrlParams().email || 'testuser@example.com';
-                const userLocation = vehicleMarker.getLngLat();
-                sendWebhook('complete', userEmail, userLocation.lat, userLocation.lng);
-                
-                document.getElementById('message').textContent = `Job Complete!`;
-                
-                // Close the window after a short delay
-                setTimeout(() => {
-                    window.close();
-                }, 1000);
-            });
-            
-            // Handle voice button click
-            document.getElementById('voice-button').addEventListener('click', () => {
-                // Toggle voice activation
-                speechActive = !speechActive;
-                const messageElement = document.getElementById('message');
-                if (speechActive) {
-                    messageElement.textContent = 'Voice navigation enabled.';
-                    // Immediately speak the first instruction
-                    speakInstructions(); 
-                } else {
-                    messageElement.textContent = 'Voice navigation disabled.';
-                }
-            });
-        };
+        }
     </script>
 </body>
 </html>
