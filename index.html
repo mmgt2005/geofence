@@ -47,6 +47,11 @@
         let currentRoute = null;
         let currentStepIndex = 0;
         let instructionCheckInterval = null;
+        
+        // NEW: Separate tracking for voice navigation vs geofence status
+        let lastSpokenInstruction = '';
+        let isCurrentlySpeaking = false;
+        let pendingGeofenceUpdate = null;
 
         // Initialize voice button immediately
         document.addEventListener('DOMContentLoaded', function() {
@@ -82,18 +87,62 @@
             }catch(e){console.error('Error sending webhook:',e);}
         }
 
+        // NEW: Improved message management
+        function updateMessage(text, priority = 'normal', temporary = false) {
+            const msg = document.getElementById('message');
+            
+            // Don't interrupt voice navigation messages unless high priority
+            if (speechActive && priority !== 'high' && isCurrentlySpeaking) {
+                console.log('⏳ Message update queued (voice navigation active):', text);
+                pendingGeofenceUpdate = text;
+                return;
+            }
+            
+            msg.textContent = text;
+            
+            // Clear any pending updates if we're setting a high priority message
+            if (priority === 'high') {
+                pendingGeofenceUpdate = null;
+            }
+            
+            // If temporary, revert after delay (only if not speaking)
+            if (temporary && !speechActive) {
+                setTimeout(() => {
+                    if (!speechActive && !isCurrentlySpeaking) {
+                        msg.textContent = 'Vehicle is on its way to the job location...';
+                    }
+                }, 3000);
+            }
+        }
+
         function checkGeofence(email,latitude,longitude){
             if(!geofence||!vehicleMarker)return;
-            const msg=document.getElementById('message');
+            
             const jobMsg=document.getElementById('job-message');
             const point=turf.point([longitude,latitude]);
             const inside=turf.booleanPointInPolygon(point,geofence);
-            if(jobTitle&&jobTitle!=='a job'){jobMsg.textContent=`Job: ${jobTitle}`;jobMsg.classList.remove('hidden');}
-            else{jobMsg.classList.add('hidden');}
+            
+            if(jobTitle&&jobTitle!=='a job'){
+                jobMsg.textContent=`Job: ${jobTitle}`;
+                jobMsg.classList.remove('hidden');
+            } else {
+                jobMsg.classList.add('hidden');
+            }
 
-            if(inside&&!isInsideGeofence){sendWebhook('inside',email,latitude,longitude);isInsideGeofence=true;msg.textContent='Vehicle is at the job location!';}
-            else if(!inside&&isInsideGeofence){sendWebhook('outside',email,latitude,longitude);isInsideGeofence=false;msg.textContent='Vehicle has left the job location!';}
-            else if(!isInsideGeofence && !speechActive){msg.textContent='Vehicle is on its way to the job location...';}
+            // NEW: Only update geofence status if not actively doing voice navigation
+            if(inside&&!isInsideGeofence){
+                sendWebhook('inside',email,latitude,longitude);
+                isInsideGeofence=true;
+                updateMessage('Vehicle is at the job location!', 'high');
+            }
+            else if(!inside&&isInsideGeofence){
+                sendWebhook('outside',email,latitude,longitude);
+                isInsideGeofence=false;
+                updateMessage('Vehicle has left the job location!', 'high');
+            }
+            else if(!isInsideGeofence && !speechActive && !isCurrentlySpeaking){
+                updateMessage('Vehicle is on its way to the job location...');
+            }
         }
 
         function speakText(text){
@@ -102,10 +151,17 @@
                 return;
             }
             
+            // Don't repeat the same instruction
+            if (text === lastSpokenInstruction) {
+                console.log('🔄 Skipping repeat instruction:', text);
+                return;
+            }
+            
             console.log('🔊 SPEAKING:', text);
             
             // Cancel any ongoing speech
             window.speechSynthesis.cancel();
+            isCurrentlySpeaking = true;
             
             setTimeout(() => {
                 const utter = new SpeechSynthesisUtterance(text);
@@ -113,9 +169,31 @@
                 utter.rate = 0.9;
                 utter.volume = 0.8;
                 
-                utter.onstart = () => console.log('🎤 Speech started:', text);
-                utter.onend = () => console.log('🎤 Speech ended:', text);
-                utter.onerror = (e) => console.log('❌ Speech error:', e);
+                utter.onstart = () => {
+                    console.log('🎤 Speech started:', text);
+                    isCurrentlySpeaking = true;
+                    lastSpokenInstruction = text;
+                };
+                
+                utter.onend = () => {
+                    console.log('🎤 Speech ended:', text);
+                    isCurrentlySpeaking = false;
+                    
+                    // Check if there's a pending geofence update
+                    if (pendingGeofenceUpdate && !speechActive) {
+                        setTimeout(() => {
+                            if (!isCurrentlySpeaking) {
+                                updateMessage(pendingGeofenceUpdate);
+                                pendingGeofenceUpdate = null;
+                            }
+                        }, 500);
+                    }
+                };
+                
+                utter.onerror = (e) => {
+                    console.log('❌ Speech error:', e);
+                    isCurrentlySpeaking = false;
+                };
                 
                 window.speechSynthesis.speak(utter);
             }, 100);
@@ -143,57 +221,9 @@
             }
         }
 
-        function getRouteInstructions() {
-            console.log('🔍 Getting route instructions...');
-            
-            // Method 1: Try multiple API approaches
-            if (directions) {
-                try {
-                    const route = directions.getRoute();
-                    if (route && route.legs && route.legs[0] && route.legs[0].steps) {
-                        console.log('✅ Found', route.legs[0].steps.length, 'steps from API');
-                        return route.legs[0].steps;
-                    }
-                } catch (e) {
-                    console.warn('❌ API method failed:', e);
-                }
-            }
-
-            // Method 2: Only get instructions from DOM - don't return all at once
-            const selectors = [
-                '.mapbox-directions-step-maneuver-instruction',
-                '.mapboxgl-directions-step-maneuver-instruction', 
-                '.mapbox-directions-instruction',
-                '[class*="instruction"]'
-            ];
-
-            for (const selector of selectors) {
-                const elements = document.querySelectorAll(selector);
-                
-                if (elements.length > 0) {
-                    const instructions = Array.from(elements).map((el, index) => {
-                        const text = el.textContent.trim();
-                        return { 
-                            maneuver: { instruction: text },
-                            stepIndex: index 
-                        };
-                    }).filter(inst => inst.maneuver.instruction.length > 0);
-                    
-                    if (instructions.length > 0) {
-                        console.log('✅ Found', instructions.length, 'instructions from DOM');
-                        return instructions;
-                    }
-                }
-            }
-
-            console.log('❌ No instructions found by any method');
-            return [];
-        }
-
         function getCurrentInstruction() {
             console.log('🎯 === getCurrentInstruction called ===');
             
-            // First, let's see what directions container exists
             const directionsContainer = document.querySelector('.mapboxgl-ctrl-directions');
             if (!directionsContainer) {
                 console.log('❌ No directions container found at all');
@@ -202,7 +232,6 @@
             
             console.log('✅ Directions container found');
             
-            // Method 1: Look for step elements with multiple selectors
             const stepSelectors = [
                 '.mapbox-directions-step',
                 '.mapboxgl-directions-step',
@@ -222,21 +251,19 @@
             if (allSteps.length === 0) {
                 console.log('❌ No step elements found with any selector');
                 
-                // Method 2: Try to parse any text in the directions container
                 const containerText = directionsContainer.innerText;
                 console.log('📄 Directions container text:', containerText);
                 
-                // Look for instruction-like text
                 const lines = containerText.split('\n').filter(line => {
                     const trimmed = line.trim();
                     return trimmed.length > 10 && 
                            !trimmed.match(/\d+\.?\d*\s*(km|mi|miles?|minutes?|min|hrs?|hours?)/i) &&
                            !trimmed.match(/^\d+\s*(km|mi)/) &&
-                           trimmed.toLowerCase().includes('turn') ||
+                           (trimmed.toLowerCase().includes('turn') ||
                            trimmed.toLowerCase().includes('head') ||
                            trimmed.toLowerCase().includes('continue') ||
                            trimmed.toLowerCase().includes('exit') ||
-                           trimmed.toLowerCase().includes('merge');
+                           trimmed.toLowerCase().includes('merge'));
                 });
                 
                 if (lines.length > 0) {
@@ -247,7 +274,6 @@
                 return null;
             }
             
-            // Method 3: Look for active step
             let activeStep = null;
             const activeSelectors = [
                 '.mapbox-directions-step-active',
@@ -269,7 +295,6 @@
             }
             
             if (activeStep) {
-                // Try multiple instruction selectors within the step
                 const instructionSelectors = [
                     '.mapbox-directions-step-maneuver-instruction',
                     '.mapboxgl-directions-step-maneuver-instruction',
@@ -287,10 +312,8 @@
                     }
                 }
                 
-                // Fallback: get any text from the step
                 const stepText = activeStep.innerText.trim();
                 if (stepText) {
-                    // Parse out just the instruction part (remove distances/times)
                     const lines = stepText.split('\n').filter(line => {
                         const trimmed = line.trim();
                         return trimmed.length > 5 && 
@@ -321,8 +344,8 @@
             
             // Cancel any ongoing speech
             window.speechSynthesis.cancel();
+            isCurrentlySpeaking = false;
             
-            // Wait a bit longer for Mapbox to fully render the instructions
             console.log('⏳ Waiting for instructions to fully load...');
             
             let attempts = 0;
@@ -336,10 +359,9 @@
                 
                 if (instruction && instruction !== "No text found") {
                     console.log('✅ Got instruction, starting navigation:', instruction);
-                    document.getElementById('message').textContent = instruction;
+                    updateMessage(instruction, 'high');
                     speakText(instruction);
                     
-                    // Start monitoring for changes
                     setupStepChangeMonitoring(instruction);
                     
                 } else if (attempts < maxAttempts) {
@@ -349,19 +371,17 @@
                 } else {
                     console.log('❌ Max attempts reached, using fallback');
                     const fallback = "Navigation started. Follow the route.";
-                    document.getElementById('message').textContent = fallback;
+                    updateMessage(fallback, 'high');
                     speakText(fallback);
                 }
             };
             
-            // Start trying immediately, then keep trying
             tryToStartNavigation();
         }
         
         function setupStepChangeMonitoring(initialInstruction) {
             console.log('⏰ Setting up step change monitoring...');
             
-            let lastSpokenInstruction = initialInstruction;
             let lastActiveStepIndex = -1;
             
             instructionCheckInterval = setInterval(() => {
@@ -388,14 +408,13 @@
                         
                         if (newInstruction && newInstruction !== lastSpokenInstruction && newInstruction !== "No text found") {
                             console.log('📢 Speaking NEW instruction:', newInstruction);
-                            document.getElementById('message').textContent = newInstruction;
+                            updateMessage(newInstruction, 'high');
                             speakText(newInstruction);
-                            lastSpokenInstruction = newInstruction;
                             lastActiveStepIndex = newActiveIndex;
                         }
                     }
                 }
-            }, 3000);
+            }, 4000); // Increased interval to reduce CPU usage
         }
 
         function stopTurnByTurnNavigation() {
@@ -407,36 +426,50 @@
             }
             
             window.speechSynthesis.cancel();
+            isCurrentlySpeaking = false;
+            lastSpokenInstruction = '';
+            pendingGeofenceUpdate = null;
         }
 
         function toggleVoiceNavigation() {
             console.log('🎯 Voice button clicked, current state:', speechActive);
             
             speechActive = !speechActive;
-            const msg = document.getElementById('message');
             
             if (speechActive) {
                 if (!directionsReady) {
-                    msg.textContent = 'Waiting for route to load...';
+                    updateMessage('Waiting for route to load...', 'high');
                     speakText('Please wait for the route to load.');
                 } else {
-                    msg.textContent = 'Voice navigation enabled';
+                    updateMessage('Voice navigation enabled', 'high');
                     speakText('Voice navigation enabled');
                     
-                    // Start navigation after a brief delay
                     setTimeout(() => {
                         startTurnByTurnNavigation();
                     }, 1500);
                 }
             } else {
-                msg.textContent = 'Voice navigation disabled';
+                updateMessage('Voice navigation disabled', 'high', true);
                 stopTurnByTurnNavigation();
             }
             
             updateVoiceButtonState();
         }
 
+        // NEW: Throttled location updates to prevent voice interference
+        let lastLocationUpdate = 0;
+        const LOCATION_UPDATE_INTERVAL = 2000; // 2 seconds minimum between updates
+
         function onGeolocationSuccess(pos){
+            const now = Date.now();
+            
+            // Throttle location updates when voice is active
+            if (speechActive && isCurrentlySpeaking && (now - lastLocationUpdate) < LOCATION_UPDATE_INTERVAL) {
+                return; // Skip this update
+            }
+            
+            lastLocationUpdate = now;
+            
             const coords=pos.coords;
             const userLoc=new mapboxgl.LngLat(coords.longitude,coords.latitude);
             const userEmail=getUrlParams().email||'testuser@example.com';
@@ -459,7 +492,7 @@
                 map.dragPan.disable();
                 map.on('mousedown',()=>{
                     if (!speechActive) {
-                        document.getElementById('message').textContent="Map movement is disabled for this navigation.";
+                        updateMessage("Map movement is disabled for this navigation.", 'normal', true);
                     }
                 });
                 
@@ -473,7 +506,6 @@
                     console.log('📊 Route data:', e.route);
                     currentRoute = e.route;
                     
-                    // Wait longer for UI to render and try multiple times
                     let attempts = 0;
                     const maxAttempts = 10;
                     
@@ -498,12 +530,6 @@
                             updateVoiceButtonState();
                             console.log('🎉 Directions UI ready, voice navigation available');
                             
-                            // Test instruction retrieval immediately
-                            console.log('🧪 Testing instruction retrieval...');
-                            const testInstructions = getRouteInstructions();
-                            console.log('🧪 Test result:', testInstructions.length, 'instructions found');
-                            
-                            // If voice was enabled while waiting, start navigation
                             if (speechActive) {
                                 console.log('🚀 Voice was already enabled, starting navigation...');
                                 setTimeout(() => {
@@ -520,13 +546,12 @@
                         }
                     };
                     
-                    // Start checking after initial delay
                     setTimeout(checkDirectionsReady, 3000);
                 });
 
                 directions.on('error', (e) => {
                     console.error('❌ Directions error:', e);
-                    document.getElementById('message').textContent = 'Error calculating route. Please check your connection.';
+                    updateMessage('Error calculating route. Please check your connection.', 'high');
                 });
 
                 directions.on('clear', () => {
@@ -548,27 +573,29 @@
                 directions.setOrigin([coords.longitude,coords.latitude]);
             }
             
-            checkGeofence(userEmail,coords.latitude,coords.longitude);
+            // Only check geofence if not currently speaking
+            if (!isCurrentlySpeaking) {
+                checkGeofence(userEmail,coords.latitude,coords.longitude);
+            }
         }
 
         function onGeolocationError(err){
-            const msg = document.getElementById('message');
             console.warn(`Geolocation error(${err.code}): ${err.message}`);
             
             switch(err.code) {
                 case err.PERMISSION_DENIED:
-                    msg.textContent = "Location access denied. Please enable location services.";
+                    updateMessage("Location access denied. Please enable location services.", 'high');
                     break;
                 case err.POSITION_UNAVAILABLE:
-                    msg.textContent = "Location information unavailable. Retrying...";
+                    updateMessage("Location information unavailable. Retrying...", 'high');
                     retryGeolocation();
                     break;
                 case err.TIMEOUT:
-                    msg.textContent = "Location request timed out. Retrying with better settings...";
+                    updateMessage("Location request timed out. Retrying with better settings...", 'high');
                     retryGeolocation();
                     break;
                 default:
-                    msg.textContent = `Geolocation error: ${err.message}`;
+                    updateMessage(`Geolocation error: ${err.message}`, 'high');
                     break;
             }
         }
@@ -579,13 +606,13 @@
         function retryGeolocation() {
             if (geolocationRetries < maxGeolocationRetries) {
                 geolocationRetries++;
-                document.getElementById('message').textContent = `Retrying location (${geolocationRetries}/${maxGeolocationRetries})...`;
+                updateMessage(`Retrying location (${geolocationRetries}/${maxGeolocationRetries})...`, 'high');
                 
                 setTimeout(() => {
                     startGeolocationTracking();
                 }, 2000);
             } else {
-                document.getElementById('message').textContent = "Unable to get location. Please check your GPS and try refreshing.";
+                updateMessage("Unable to get location. Please check your GPS and try refreshing.", 'high');
             }
         }
 
@@ -593,13 +620,13 @@
             const options = {
                 enableHighAccuracy: geolocationRetries > 0 ? false : true,
                 timeout: geolocationRetries === 0 ? 10000 : 15000,
-                maximumAge: geolocationRetries > 1 ? 60000 : 0
+                maximumAge: geolocationRetries > 1 ? 60000 : 5000 // Reduced cache time when voice active
             };
 
             if (navigator.geolocation) {
                 navigator.geolocation.watchPosition(onGeolocationSuccess, onGeolocationError, options);
             } else {
-                document.getElementById('message').textContent = 'Geolocation not supported by this browser.';
+                updateMessage('Geolocation not supported by this browser.', 'high');
             }
         }
 
@@ -639,11 +666,10 @@
                 const userEmail=getUrlParams().email||'testuser@example.com';
                 const loc=vehicleMarker ? vehicleMarker.getLngLat() : {lat: 0, lng: 0};
                 sendWebhook('complete',userEmail,loc.lat,loc.lng);
-                document.getElementById('message').textContent='Job Complete!';
+                updateMessage('Job Complete!', 'high');
                 setTimeout(()=>{ window.close(); },1000);
             });
 
-            // Ensure voice button is connected (backup)
             const voiceBtn = document.getElementById('voice-button');
             if (voiceBtn && !voiceBtn.onclick) {
                 voiceBtn.addEventListener('click', toggleVoiceNavigation);
