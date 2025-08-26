@@ -50,6 +50,7 @@
         
         // NEW: Separate tracking for voice navigation vs geofence status
         let lastSpokenInstruction = '';
+        let lastProcessedInstruction = '';
         let isCurrentlySpeaking = false;
         let pendingGeofenceUpdate = null;
 
@@ -342,9 +343,11 @@
                 instructionCheckInterval = null;
             }
             
-            // Cancel any ongoing speech
+            // Cancel any ongoing speech and reset state
             window.speechSynthesis.cancel();
             isCurrentlySpeaking = false;
+            lastSpokenInstruction = '';
+            lastProcessedInstruction = '';
             
             console.log('⏳ Waiting for instructions to fully load...');
             
@@ -358,11 +361,15 @@
                 const instruction = getCurrentInstruction();
                 
                 if (instruction && instruction !== "No text found") {
-                    console.log('✅ Got instruction, starting navigation:', instruction);
+                    console.log('✅ Got initial instruction:', instruction);
                     updateMessage(instruction, 'high');
                     speakText(instruction);
+                    lastProcessedInstruction = instruction;
                     
-                    setupStepChangeMonitoring(instruction);
+                    // Wait for speech to start before setting up monitoring
+                    setTimeout(() => {
+                        setupStepChangeMonitoring(instruction);
+                    }, 2000);
                     
                 } else if (attempts < maxAttempts) {
                     console.log(`❌ No instruction found, trying again in 2 seconds... (attempt ${attempts})`);
@@ -373,6 +380,7 @@
                     const fallback = "Navigation started. Follow the route.";
                     updateMessage(fallback, 'high');
                     speakText(fallback);
+                    lastProcessedInstruction = fallback;
                 }
             };
             
@@ -383,6 +391,7 @@
             console.log('⏰ Setting up step change monitoring...');
             
             let lastActiveStepIndex = -1;
+            let lastProcessedInstruction = initialInstruction;
             
             instructionCheckInterval = setInterval(() => {
                 if (!speechActive) {
@@ -394,6 +403,12 @@
                     return;
                 }
                 
+                // Don't check for new instructions while currently speaking
+                if (isCurrentlySpeaking) {
+                    console.log('🎤 Currently speaking, skipping instruction check');
+                    return;
+                }
+                
                 const activeStepEl = document.querySelector('.mapbox-directions-step-active') || 
                                    document.querySelector('.mapbox-directions-step.active');
                 
@@ -401,20 +416,33 @@
                     const allSteps = document.querySelectorAll('.mapbox-directions-step');
                     const newActiveIndex = Array.from(allSteps).indexOf(activeStepEl);
                     
+                    // Only process if step index actually changed
                     if (newActiveIndex !== -1 && newActiveIndex !== lastActiveStepIndex) {
-                        console.log('🔄 STEP CHANGED! From', lastActiveStepIndex, 'to', newActiveIndex);
+                        console.log('🔄 STEP INDEX CHANGED! From', lastActiveStepIndex, 'to', newActiveIndex);
                         
                         const newInstruction = getCurrentInstruction();
                         
-                        if (newInstruction && newInstruction !== lastSpokenInstruction && newInstruction !== "No text found") {
-                            console.log('📢 Speaking NEW instruction:', newInstruction);
+                        // Check both step index AND instruction content changed
+                        if (newInstruction && 
+                            newInstruction !== lastProcessedInstruction && 
+                            newInstruction !== lastSpokenInstruction && 
+                            newInstruction !== "No text found") {
+                            
+                            console.log('📢 NEW INSTRUCTION DETECTED:', newInstruction);
+                            console.log('📊 Previous instruction:', lastProcessedInstruction);
+                            
                             updateMessage(newInstruction, 'high');
                             speakText(newInstruction);
                             lastActiveStepIndex = newActiveIndex;
+                            lastProcessedInstruction = newInstruction;
+                        } else {
+                            console.log('⏭️ Step changed but instruction same:', newInstruction);
                         }
                     }
+                } else {
+                    console.log('❌ No active step found in monitoring');
                 }
-            }, 4000); // Increased interval to reduce CPU usage
+            }, 5000); // Increased interval to reduce interference
         }
 
         function stopTurnByTurnNavigation() {
