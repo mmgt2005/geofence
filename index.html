@@ -47,12 +47,14 @@
         let currentRoute = null;
         let instructionCheckInterval = null;
         
-        // Enhanced instruction tracking
-        let lastSpokenInstructionHash = '';  // Use hash to detect actual content changes
+        // Enhanced instruction tracking with mobile-specific fixes
+        let lastSpokenInstructionHash = '';  
         let isCurrentlySpeaking = false;
         let pendingGeofenceUpdate = null;
-        let spokenInstructions = new Set(); // Track all spoken instructions to avoid any repeats
-        let lastActiveStepElement = null;    // Track DOM element changes
+        let spokenInstructions = new Set(); 
+        let lastActiveStepElement = null;    
+        let firstInstructionSpoken = false; // New flag to track if we've spoken the first instruction
+        let lastSpokenText = ''; // Track the actual text to prevent repeats
 
         // Initialize voice button immediately
         document.addEventListener('DOMContentLoaded', function() {
@@ -160,25 +162,41 @@
 
         function speakText(text){
             if(!text || !speechActive) {
-                console.log('Not speaking:', text, 'speechActive:', speechActive);
+                console.log('Not speaking - text:', !!text, 'speechActive:', speechActive);
                 return;
             }
             
+            // Multiple layers of duplicate prevention
             const instructionHash = createInstructionHash(text);
+            const trimmedText = text.trim().toLowerCase();
             
-            // Stronger duplicate detection
+            // Check 1: Hash-based duplicate detection
             if (spokenInstructions.has(instructionHash)) {
-                console.log('Duplicate instruction blocked:', text);
+                console.log('BLOCKED: Hash duplicate -', text);
                 return;
             }
             
-            // Also check if this instruction was just spoken (within last 30 seconds)
-            if (lastSpokenInstructionHash === instructionHash) {
-                console.log('Same instruction as last spoken, blocking:', text);
+            // Check 2: Text-based duplicate detection
+            if (lastSpokenText === trimmedText) {
+                console.log('BLOCKED: Text duplicate -', text);
                 return;
             }
             
-            console.log('SPEAKING NEW INSTRUCTION:', text);
+            // Check 3: First instruction flag (prevents repeating the very first instruction)
+            if (firstInstructionSpoken && spokenInstructions.size === 1 && 
+                lastSpokenInstructionHash === instructionHash) {
+                console.log('BLOCKED: First instruction repeat -', text);
+                return;
+            }
+            
+            console.log('SPEAKING:', text);
+            
+            // Set flags before speaking to prevent race conditions
+            lastSpokenText = trimmedText;
+            if (!firstInstructionSpoken) {
+                firstInstructionSpoken = true;
+                console.log('First instruction flag set');
+            }
             
             // Cancel any ongoing speech more gracefully
             if (window.speechSynthesis.speaking) {
@@ -361,6 +379,10 @@
             // Cancel any ongoing speech
             window.speechSynthesis.cancel();
             
+            // Immediately capture the baseline step BEFORE speaking
+            lastActiveStepElement = document.querySelector('.mapbox-directions-step-active') || 
+                                   document.querySelector('.mapbox-directions-step');
+            
             // Speak the first available instruction immediately
             setTimeout(() => {
                 const firstInstruction = getCurrentInstruction();
@@ -369,13 +391,15 @@
                     updateMessage(firstInstruction, 'high');
                     speakText(firstInstruction);
                     
-                    // Capture the current active step for monitoring
-                    lastActiveStepElement = document.querySelector('.mapbox-directions-step-active') || 
-                                           document.querySelector('.mapbox-directions-step');
+                    // Wait for speech to be marked as spoken, then start monitoring
+                    setTimeout(() => {
+                        console.log('Starting monitoring after first instruction spoken');
+                        startInstructionMonitoring();
+                    }, 2000);
+                } else {
+                    // No instruction available yet, start monitoring anyway
+                    startInstructionMonitoring();
                 }
-                
-                // Start monitoring for changes
-                startInstructionMonitoring();
             }, 1000);
         }
         
@@ -391,40 +415,52 @@
                 }
                 
                 if (isCurrentlySpeaking) {
+                    console.log('Currently speaking, skipping check');
                     return; // Don't interrupt ongoing speech
                 }
+                
+                // Debug: Log monitoring state
+                console.log('MONITORING CHECK - firstSpoken:', firstInstructionSpoken, 'spokenCount:', spokenInstructions.size);
                 
                 const currentActiveStep = document.querySelector('.mapbox-directions-step-active') || 
                                          document.querySelector('.mapbox-directions-step');
                 
-                // Only check for changes if we have a valid step to compare
-                if (currentActiveStep && lastActiveStepElement) {
+                if (!currentActiveStep) {
+                    console.log('No active step found');
+                    return;
+                }
+                
+                // Only check for changes if we have a valid step to compare AND we've already spoken the first instruction
+                if (lastActiveStepElement && firstInstructionSpoken) {
                     // Check if the active step changed by comparing the actual DOM elements
                     if (currentActiveStep !== lastActiveStepElement) {
-                        console.log('Active step changed - checking for new instruction');
+                        console.log('STEP CHANGED - checking for new instruction');
                         lastActiveStepElement = currentActiveStep;
                         
                         const newInstruction = getCurrentInstruction();
+                        console.log('New step instruction:', newInstruction);
                         
                         if (newInstruction && newInstruction.length > 8) {
                             const instructionHash = createInstructionHash(newInstruction);
                             
                             if (!spokenInstructions.has(instructionHash)) {
-                                console.log('New instruction detected:', newInstruction);
+                                console.log('SPEAKING new instruction:', newInstruction);
                                 updateMessage(newInstruction, 'high');
                                 speakText(newInstruction);
                             } else {
                                 console.log('Step changed but instruction already spoken:', newInstruction);
                             }
                         }
+                    } else {
+                        console.log('Same step as before - no change');
                     }
-                } else if (currentActiveStep && !lastActiveStepElement) {
-                    // First time we have a step - set it as baseline but don't speak again
-                    console.log('Setting initial active step for monitoring');
+                } else if (currentActiveStep && !lastActiveStepElement && !firstInstructionSpoken) {
+                    // This shouldn't happen anymore since we set lastActiveStepElement before speaking
+                    console.log('UNEXPECTED: Setting baseline step without first instruction spoken');
                     lastActiveStepElement = currentActiveStep;
                 }
                 
-            }, 3000); // Check every 3 seconds
+            }, 5000); // Increased to 5 seconds to reduce frequency
         }
 
         function stopTurnByTurnNavigation() {
@@ -441,6 +477,8 @@
             lastSpokenInstructionHash = '';
             lastActiveStepElement = null;
             pendingGeofenceUpdate = null;
+            firstInstructionSpoken = false; // Reset the flag
+            lastSpokenText = ''; // Reset text tracking
         }
 
         function toggleVoiceNavigation() {
