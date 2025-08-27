@@ -166,8 +166,15 @@
             
             const instructionHash = createInstructionHash(text);
             
+            // Stronger duplicate detection
             if (spokenInstructions.has(instructionHash)) {
-                console.log('Instruction already spoken, skipping:', text);
+                console.log('Duplicate instruction blocked:', text);
+                return;
+            }
+            
+            // Also check if this instruction was just spoken (within last 30 seconds)
+            if (lastSpokenInstructionHash === instructionHash) {
+                console.log('Same instruction as last spoken, blocking:', text);
                 return;
             }
             
@@ -176,7 +183,6 @@
             // Cancel any ongoing speech more gracefully
             if (window.speechSynthesis.speaking) {
                 window.speechSynthesis.cancel();
-                // Small delay to let cancellation complete
                 setTimeout(() => speakTextNow(text, instructionHash), 300);
             } else {
                 speakTextNow(text, instructionHash);
@@ -391,33 +397,31 @@
                 const currentActiveStep = document.querySelector('.mapbox-directions-step-active') || 
                                          document.querySelector('.mapbox-directions-step');
                 
-                // Check if the active step changed
-                if (currentActiveStep && currentActiveStep !== lastActiveStepElement) {
-                    console.log('Active step changed - checking for new instruction');
-                    lastActiveStepElement = currentActiveStep;
-                    
-                    const newInstruction = getCurrentInstruction();
-                    
-                    if (newInstruction && newInstruction.length > 8) {
-                        const instructionHash = createInstructionHash(newInstruction);
+                // Only check for changes if we have a valid step to compare
+                if (currentActiveStep && lastActiveStepElement) {
+                    // Check if the active step changed by comparing the actual DOM elements
+                    if (currentActiveStep !== lastActiveStepElement) {
+                        console.log('Active step changed - checking for new instruction');
+                        lastActiveStepElement = currentActiveStep;
                         
-                        if (!spokenInstructions.has(instructionHash)) {
-                            console.log('New instruction detected:', newInstruction);
-                            updateMessage(newInstruction, 'high');
-                            speakText(newInstruction);
+                        const newInstruction = getCurrentInstruction();
+                        
+                        if (newInstruction && newInstruction.length > 8) {
+                            const instructionHash = createInstructionHash(newInstruction);
+                            
+                            if (!spokenInstructions.has(instructionHash)) {
+                                console.log('New instruction detected:', newInstruction);
+                                updateMessage(newInstruction, 'high');
+                                speakText(newInstruction);
+                            } else {
+                                console.log('Step changed but instruction already spoken:', newInstruction);
+                            }
                         }
                     }
-                }
-                
-                // Fallback: if we haven't spoken anything and there's an available instruction
-                if (spokenInstructions.size === 0) {
-                    const instruction = getCurrentInstruction();
-                    if (instruction && instruction.length > 8) {
-                        console.log('First instruction available:', instruction);
-                        updateMessage(instruction, 'high');
-                        speakText(instruction);
-                        lastActiveStepElement = currentActiveStep;
-                    }
+                } else if (currentActiveStep && !lastActiveStepElement) {
+                    // First time we have a step - set it as baseline but don't speak again
+                    console.log('Setting initial active step for monitoring');
+                    lastActiveStepElement = currentActiveStep;
                 }
                 
             }, 3000); // Check every 3 seconds
