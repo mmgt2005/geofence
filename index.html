@@ -93,7 +93,7 @@
             
             // Don't interrupt voice navigation messages unless high priority
             if (speechActive && priority !== 'high' && isCurrentlySpeaking) {
-                console.log('⏳ Message update queued (voice navigation active):', text);
+                console.log('Message update queued (voice navigation active):', text);
                 pendingGeofenceUpdate = text;
                 return;
             }
@@ -160,60 +160,69 @@
 
         function speakText(text){
             if(!text || !speechActive) {
-                console.log('❌ Not speaking:', text, 'speechActive:', speechActive);
+                console.log('Not speaking:', text, 'speechActive:', speechActive);
                 return;
             }
             
-            // Create hash of instruction to detect real changes
             const instructionHash = createInstructionHash(text);
             
-            // Check if we've already spoken this exact instruction
             if (spokenInstructions.has(instructionHash)) {
-                console.log('🔄 Instruction already spoken, skipping:', text);
+                console.log('Instruction already spoken, skipping:', text);
                 return;
             }
             
-            console.log('🔊 SPEAKING NEW INSTRUCTION:', text);
+            console.log('SPEAKING NEW INSTRUCTION:', text);
             
-            // Cancel any ongoing speech
-            window.speechSynthesis.cancel();
+            // Cancel any ongoing speech more gracefully
+            if (window.speechSynthesis.speaking) {
+                window.speechSynthesis.cancel();
+                // Small delay to let cancellation complete
+                setTimeout(() => speakTextNow(text, instructionHash), 300);
+            } else {
+                speakTextNow(text, instructionHash);
+            }
+        }
+        
+        function speakTextNow(text, instructionHash) {
             isCurrentlySpeaking = true;
             
-            setTimeout(() => {
-                const utter = new SpeechSynthesisUtterance(text);
-                utter.lang = 'en-US';
-                utter.rate = 0.9;
-                utter.volume = 0.8;
+            const utter = new SpeechSynthesisUtterance(text);
+            utter.lang = 'en-US';
+            utter.rate = 0.9;
+            utter.volume = 0.8;
+            
+            utter.onstart = () => {
+                console.log('Speech started:', text);
+                isCurrentlySpeaking = true;
+                lastSpokenInstructionHash = instructionHash;
+                spokenInstructions.add(instructionHash);
+            };
+            
+            utter.onend = () => {
+                console.log('Speech ended:', text);
+                isCurrentlySpeaking = false;
                 
-                utter.onstart = () => {
-                    console.log('🎤 Speech started:', text);
-                    isCurrentlySpeaking = true;
-                    lastSpokenInstructionHash = instructionHash;
-                    spokenInstructions.add(instructionHash);
-                };
+                if (pendingGeofenceUpdate && !speechActive) {
+                    setTimeout(() => {
+                        if (!isCurrentlySpeaking) {
+                            updateMessage(pendingGeofenceUpdate);
+                            pendingGeofenceUpdate = null;
+                        }
+                    }, 500);
+                }
+            };
+            
+            utter.onerror = (e) => {
+                console.log('Speech error (handled):', e.error);
+                isCurrentlySpeaking = false;
                 
-                utter.onend = () => {
-                    console.log('🎤 Speech ended:', text);
-                    isCurrentlySpeaking = false;
-                    
-                    // Check if there's a pending geofence update
-                    if (pendingGeofenceUpdate && !speechActive) {
-                        setTimeout(() => {
-                            if (!isCurrentlySpeaking) {
-                                updateMessage(pendingGeofenceUpdate);
-                                pendingGeofenceUpdate = null;
-                            }
-                        }, 500);
-                    }
-                };
-                
-                utter.onerror = (e) => {
-                    console.log('❌ Speech error:', e);
-                    isCurrentlySpeaking = false;
-                };
-                
-                window.speechSynthesis.speak(utter);
-            }, 100);
+                // Don't retry for interrupted errors - they're normal
+                if (e.error !== 'interrupted') {
+                    console.warn('Unexpected speech error:', e);
+                }
+            };
+            
+            window.speechSynthesis.speak(utter);
         }
 
         function updateVoiceButtonState() {
@@ -239,99 +248,73 @@
         }
 
         function getCurrentInstruction() {
-            console.log('🎯 === getCurrentInstruction called ===');
-            
-            const directionsContainer = document.querySelector('.mapboxgl-ctrl-directions');
-            if (!directionsContainer) {
-                console.log('❌ No directions container found');
-                return null;
-            }
-            
-            // Wait a bit for content to load if directions container just appeared
-            const containerHasContent = directionsContainer.textContent.trim().length > 50;
-            if (!containerHasContent) {
-                console.log('⏳ Directions container empty, content may still be loading');
-                return null;
-            }
-            
-            // Try to find active step first
+            // First, try to get the currently active/highlighted step
             const activeStep = document.querySelector('.mapbox-directions-step-active') || 
-                              document.querySelector('.mapbox-directions-step.active') ||
-                              document.querySelector('.mapboxgl-directions-step-active');
+                              document.querySelector('.mapbox-directions-step.active');
             
             if (activeStep) {
-                console.log('✅ Found active step element');
-                
-                // Try multiple selectors for instruction text
-                const instructionSelectors = [
-                    '.mapbox-directions-step-maneuver-instruction',
-                    '.mapboxgl-directions-step-maneuver-instruction',
-                    '.mapbox-directions-instruction',
-                    '[class*="instruction"]'
-                ];
-                
-                for (const selector of instructionSelectors) {
-                    const instructionEl = activeStep.querySelector(selector);
-                    if (instructionEl && instructionEl.textContent.trim()) {
-                        const text = instructionEl.textContent.trim();
-                        if (text.length > 8 && !text.match(/^\d+\.?\d*\s*(km|mi|ft)/i)) {
-                            console.log(`✅ Found instruction using ${selector}:`, text);
-                            return text;
-                        }
-                    }
-                }
-                
-                // Fallback to step text content, but be more selective
-                const stepText = activeStep.textContent.trim();
-                const lines = stepText.split('\n').filter(line => {
-                    const trimmed = line.trim();
-                    return trimmed.length > 15 && 
-                           !trimmed.match(/^\d+\.?\d*\s*(km|mi|miles?|minutes?|min|ft|feet)/i) &&
-                           !trimmed.match(/^\d+\s*(km|mi)/i) &&
-                           (trimmed.toLowerCase().includes('turn') ||
-                           trimmed.toLowerCase().includes('head') ||
-                           trimmed.toLowerCase().includes('continue') ||
-                           trimmed.toLowerCase().includes('exit') ||
-                           trimmed.toLowerCase().includes('merge') ||
-                           trimmed.toLowerCase().includes('straight') ||
-                           trimmed.toLowerCase().includes('keep') ||
-                           trimmed.toLowerCase().includes('take'));
-                });
-                
-                if (lines.length > 0) {
-                    console.log('✅ Found instruction from step text:', lines[0]);
-                    return lines[0].trim();
-                }
-            }
-            
-            // Enhanced fallback: look for any step with instruction content
-            const allSteps = document.querySelectorAll('.mapbox-directions-step');
-            console.log(`🔍 Found ${allSteps.length} total steps`);
-            
-            for (let i = 0; i < allSteps.length; i++) {
-                const step = allSteps[i];
-                const instruction = getCurrentInstructionFromStep(step);
-                if (instruction && instruction.length > 10) {
-                    console.log(`✅ Found instruction from step ${i}:`, instruction);
+                const instruction = extractInstructionFromStep(activeStep);
+                if (instruction && instruction.length > 8) {
+                    console.log('✅ Found ACTIVE step instruction:', instruction);
                     return instruction;
                 }
             }
             
-            // Final fallback: parse any instruction-like text from container
-            const containerText = directionsContainer.textContent;
-            const instructionPattern = /(head|turn|continue|keep|take|merge|exit)\s+[^.]*[.!]?/gi;
-            const matches = containerText.match(instructionPattern);
-            
-            if (matches && matches.length > 0) {
-                const cleanInstruction = matches[0].trim().replace(/\s+/g, ' ');
-                if (cleanInstruction.length > 10) {
-                    console.log('✅ Found instruction from pattern matching:', cleanInstruction);
-                    return cleanInstruction;
+            // Fallback: get the first available step with a valid instruction
+            const allSteps = document.querySelectorAll('.mapbox-directions-step');
+            for (let i = 0; i < Math.min(3, allSteps.length); i++) { // Only check first 3 steps
+                const step = allSteps[i];
+                const instruction = extractInstructionFromStep(step);
+                if (instruction && instruction.length > 8) {
+                    console.log(`✅ Found instruction in step ${i}:`, instruction);
+                    return instruction;
                 }
             }
             
             console.log('❌ No valid instruction found');
-            console.log('📄 Container content sample:', containerText.substring(0, 200));
+            return null;
+        }
+        
+        function extractInstructionFromStep(stepElement) {
+            if (!stepElement) return null;
+            
+            // Method 1: Look for maneuver instruction elements
+            const instructionSelectors = [
+                '.mapbox-directions-step-maneuver-instruction',
+                '.mapboxgl-directions-step-maneuver-instruction',
+                '.mapbox-directions-instruction',
+                '.mapbox-directions-step-content'
+            ];
+            
+            for (const selector of instructionSelectors) {
+                const instructionEl = stepElement.querySelector(selector);
+                if (instructionEl) {
+                    const text = instructionEl.textContent.trim();
+                    if (text.length > 8 && !text.match(/^\d+\.?\d*\s*(km|mi|ft|miles?|minutes?|min)/i)) {
+                        return text;
+                    }
+                }
+            }
+            
+            // Method 2: Extract instruction from step text content
+            const stepText = stepElement.textContent.trim();
+            
+            // Split by periods and look for navigation instructions
+            const sentences = stepText.split('.').map(s => s.trim()).filter(s => s.length > 0);
+            
+            for (const sentence of sentences) {
+                // Skip distance/time information
+                if (sentence.match(/^\d+\.?\d*\s*(km|mi|miles?|minutes?|min|ft|feet)/i)) {
+                    continue;
+                }
+                
+                // Look for navigation verbs
+                if (sentence.match(/\b(drive|turn|continue|keep|take|merge|exit|head|go|proceed|follow|bear|stay)\b/i) && 
+                    sentence.length > 10) {
+                    return sentence + '.';
+                }
+            }
+            
             return null;
         }
 
@@ -355,9 +338,9 @@
         function startTurnByTurnNavigation() {
             if (!speechActive || !directionsReady) return;
             
-            console.log('🚀 === STARTING TURN-BY-TURN NAVIGATION ===');
+            console.log('Starting turn-by-turn navigation');
             
-            // Reset all tracking variables
+            // Reset tracking variables
             spokenInstructions.clear();
             lastSpokenInstructionHash = '';
             lastActiveStepElement = null;
@@ -372,91 +355,68 @@
             // Cancel any ongoing speech
             window.speechSynthesis.cancel();
             
-            console.log('⏳ Waiting for directions to fully load...');
-            
-            let attempts = 0;
-            const maxAttempts = 15; // Increased attempts
-            
-            const getInitialInstruction = () => {
-                attempts++;
-                console.log(`🔍 Attempt ${attempts}/${maxAttempts} to get initial instruction...`);
-                
-                const instruction = getCurrentInstruction();
-                
-                if (instruction && instruction.length > 10 && !instruction.includes('No text found')) {
-                    console.log('✅ Got valid initial instruction:', instruction);
-                    updateMessage(instruction, 'high');
-                    speakText(instruction);
-                    
-                    // Start monitoring for changes after initial instruction
-                    setTimeout(() => {
-                        startInstructionMonitoring();
-                    }, 3000);
-                    
-                } else if (attempts < maxAttempts) {
-                    console.log(`❌ No valid instruction found (got: "${instruction}"), retrying in 3 seconds...`);
-                    setTimeout(getInitialInstruction, 3000); // Increased wait time
-                } else {
-                    console.log('⚠️ Max attempts reached, starting silent monitoring');
-                    // Don't speak fallback message, just start monitoring
-                    updateMessage('Voice navigation active - waiting for instructions...', 'high');
-                    startInstructionMonitoring();
-                }
-            };
-            
-            // Wait longer before starting to give Mapbox more time to load
+            // Speak the first available instruction immediately
             setTimeout(() => {
-                getInitialInstruction();
-            }, 2000);
+                const firstInstruction = getCurrentInstruction();
+                if (firstInstruction && firstInstruction.length > 8) {
+                    console.log('Speaking first instruction:', firstInstruction);
+                    updateMessage(firstInstruction, 'high');
+                    speakText(firstInstruction);
+                    
+                    // Capture the current active step for monitoring
+                    lastActiveStepElement = document.querySelector('.mapbox-directions-step-active') || 
+                                           document.querySelector('.mapbox-directions-step');
+                }
+                
+                // Start monitoring for changes
+                startInstructionMonitoring();
+            }, 1000);
         }
         
         function startInstructionMonitoring() {
-            console.log('⏰ Starting instruction change monitoring...');
+            console.log('Starting instruction monitoring...');
             
             instructionCheckInterval = setInterval(() => {
                 if (!speechActive) {
-                    console.log('🛑 Voice disabled, stopping monitoring');
+                    console.log('Voice disabled, stopping monitoring');
                     clearInterval(instructionCheckInterval);
                     instructionCheckInterval = null;
                     return;
                 }
                 
-                // Don't check while speaking to avoid interruptions
                 if (isCurrentlySpeaking) {
-                    return;
+                    return; // Don't interrupt ongoing speech
                 }
                 
                 const currentActiveStep = document.querySelector('.mapbox-directions-step-active') || 
-                                         document.querySelector('.mapbox-directions-step.active');
+                                         document.querySelector('.mapbox-directions-step');
                 
-                // Check if the active step element itself changed
+                // Check if the active step changed
                 if (currentActiveStep && currentActiveStep !== lastActiveStepElement) {
-                    console.log('🔄 Active step element changed!');
+                    console.log('Active step changed - checking for new instruction');
                     lastActiveStepElement = currentActiveStep;
                     
                     const newInstruction = getCurrentInstruction();
                     
-                    if (newInstruction && newInstruction.length > 10) {
+                    if (newInstruction && newInstruction.length > 8) {
                         const instructionHash = createInstructionHash(newInstruction);
                         
-                        // Only speak if this is truly a new instruction
                         if (!spokenInstructions.has(instructionHash)) {
-                            console.log('📢 NEW INSTRUCTION DETECTED:', newInstruction);
+                            console.log('New instruction detected:', newInstruction);
                             updateMessage(newInstruction, 'high');
                             speakText(newInstruction);
-                        } else {
-                            console.log('⏭️ Step changed but instruction already spoken:', newInstruction);
                         }
                     }
                 }
                 
-                // Additional check: if we haven't spoken anything yet and instructions are now available
+                // Fallback: if we haven't spoken anything and there's an available instruction
                 if (spokenInstructions.size === 0) {
                     const instruction = getCurrentInstruction();
-                    if (instruction && instruction.length > 10) {
-                        console.log('📢 FIRST INSTRUCTION NOW AVAILABLE:', instruction);
+                    if (instruction && instruction.length > 8) {
+                        console.log('First instruction available:', instruction);
                         updateMessage(instruction, 'high');
                         speakText(instruction);
+                        lastActiveStepElement = currentActiveStep;
                     }
                 }
                 
@@ -464,7 +424,7 @@
         }
 
         function stopTurnByTurnNavigation() {
-            console.log('🛑 Stopping turn-by-turn navigation');
+            console.log('Stopping turn-by-turn navigation');
             
             if (instructionCheckInterval) {
                 clearInterval(instructionCheckInterval);
@@ -480,7 +440,7 @@
         }
 
         function toggleVoiceNavigation() {
-            console.log('🎯 Voice button clicked, current state:', speechActive);
+            console.log('Voice button clicked, current state:', speechActive);
             
             speechActive = !speechActive;
             
@@ -545,12 +505,12 @@
                 });
                 
                 if(geofenceLocation) {
-                    console.log('🎯 Setting destination:', geofenceLocation);
+                    console.log('Setting destination:', geofenceLocation);
                     directions.setDestination([geofenceLocation.lng,geofenceLocation.lat]);
                 }
 
                 directions.on('route', (e) => {
-                    console.log('✅ Route calculated successfully');
+                    console.log('Route calculated successfully');
                     currentRoute = e.route;
                     
                     let attempts = 0;
@@ -558,39 +518,51 @@
                     
                     const checkDirectionsReady = () => {
                         attempts++;
-                        console.log(`🔍 Checking directions readiness (attempt ${attempts}/${maxAttempts})`);
+                        console.log(`Checking directions readiness (attempt ${attempts}/${maxAttempts})`);
                         
                         const hasDirectionsContainer = document.querySelector('.mapboxgl-ctrl-directions');
                         const hasSteps = document.querySelectorAll('.mapbox-directions-step').length > 0;
                         
+                        console.log(`Readiness check: container=${!!hasDirectionsContainer}, steps=${hasSteps ? document.querySelectorAll('.mapbox-directions-step').length : 0}`);
+                        
                         if (hasDirectionsContainer && hasSteps) {
                             directionsReady = true;
                             updateVoiceButtonState();
-                            console.log('🎉 Directions UI ready');
+                            console.log('Directions UI ready');
+                            
+                            // Log all available steps for debugging
+                            const allSteps = document.querySelectorAll('.mapbox-directions-step');
+                            console.log(`Found ${allSteps.length} total steps:`);
+                            allSteps.forEach((step, index) => {
+                                const stepText = step.textContent.trim().substring(0, 60);
+                                const isActive = step.classList.contains('mapbox-directions-step-active') || 
+                                               step.classList.contains('active');
+                                console.log(`  Step ${index}: ${isActive ? '[ACTIVE]' : ''} ${stepText}`);
+                            });
                             
                             if (speechActive) {
-                                console.log('🚀 Voice was already enabled, starting navigation...');
-                                setTimeout(startTurnByTurnNavigation, 1500);
+                                console.log('Voice was already enabled, starting navigation...');
+                                setTimeout(startTurnByTurnNavigation, 1000);
                             }
                         } else if (attempts < maxAttempts) {
                             setTimeout(checkDirectionsReady, 2000);
                         } else {
-                            console.log('⚠️ Max attempts reached, marking as ready');
+                            console.log('Max attempts reached, marking as ready');
                             directionsReady = true;
                             updateVoiceButtonState();
                         }
                     };
                     
-                    setTimeout(checkDirectionsReady, 2000);
+                    setTimeout(checkDirectionsReady, 1500);
                 });
 
                 directions.on('error', (e) => {
-                    console.error('❌ Directions error:', e);
+                    console.error('Directions error:', e);
                     updateMessage('Error calculating route. Please check your connection.', 'high');
                 });
 
                 directions.on('clear', () => {
-                    console.log('🧹 Route cleared');
+                    console.log('Route cleared');
                     directionsReady = false;
                     currentRoute = null;
                     stopTurnByTurnNavigation();
@@ -711,7 +683,7 @@
             }
 
             updateVoiceButtonState();
-            console.log('🚀 App initialized');
+            console.log('App initialized');
         }
     </script>
 </body>
