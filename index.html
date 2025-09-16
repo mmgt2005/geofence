@@ -26,12 +26,12 @@
 <body class="flex flex-col h-screen">
     <div id="map" class="flex-1"></div>
     <div class="p-4 bg-gray-900 text-white shadow-lg z-10 flex flex-col sm:flex-row items-center justify-between rounded-t-xl">
-        <div>
+        <div class="flex-1 mr-6">
             <p id="message" class="text-xl font-bold mb-1">Please grant location permission to start...</p>
+            <p id="distance-info" class="text-xs text-green-400 hidden mb-1"></p>
             <p id="job-message" class="text-xs text-gray-400 hidden"></p>
-            <p id="distance-info" class="text-xs text-green-400 hidden"></p>
         </div>
-        <div class="flex items-center space-x-2">
+        <div class="flex items-center space-x-3 mt-2 sm:mt-0">
             <button id="arrived-button" class="bg-green-500 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-green-600 transition-colors hidden">Job Complete</button>
             <button id="voice-button" class="bg-blue-500 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-blue-600 transition-colors">🗣️</button>
         </div>
