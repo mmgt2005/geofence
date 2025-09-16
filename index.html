@@ -29,6 +29,7 @@
         <div>
             <p id="message" class="text-xl font-bold mb-1">Please grant location permission to start...</p>
             <p id="job-message" class="text-xs text-gray-400 hidden"></p>
+            <p id="distance-info" class="text-xs text-green-400 hidden"></p>
         </div>
         <div class="flex items-center space-x-2">
             <button id="arrived-button" class="bg-green-500 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-green-600 transition-colors hidden">Job Complete</button>
@@ -47,14 +48,24 @@
         let currentRoute = null;
         let instructionCheckInterval = null;
         
-        // Enhanced instruction tracking with mobile-specific fixes
+        // Enhanced instruction tracking with distance-based triggering
         let lastSpokenInstructionHash = '';  
         let isCurrentlySpeaking = false;
         let pendingGeofenceUpdate = null;
         let spokenInstructions = new Set(); 
-        let lastActiveStepElement = null;    
-        let firstInstructionSpoken = false; // New flag to track if we've spoken the first instruction
-        let lastSpokenText = ''; // Track the actual text to prevent repeats
+        let lastActiveStepElement = null;
+        let firstInstructionSpoken = false;
+        let lastSpokenText = '';
+        let speechQueue = [];
+        let isProcessingQueue = false;
+        
+        // New variables for distance-based instruction triggering
+        const INSTRUCTION_TRIGGER_DISTANCE = 300; // feet
+        let routeSteps = [];
+        let currentStepIndex = 0;
+        let lastUserLocation = null;
+        let distanceCheckInterval = null;
+        let nextInstructionTriggered = new Set();
 
         // Initialize voice button immediately
         document.addEventListener('DOMContentLoaded', function() {
@@ -113,7 +124,7 @@
                     if (!speechActive && !isCurrentlySpeaking) {
                         msg.textContent = 'Vehicle is on its way to the job location...';
                     }
-                }, 3000);
+                }, 5000); // Extended from 3000 to 5000ms
             }
         }
 
@@ -146,64 +157,149 @@
             }
         }
 
+        // Enhanced distance calculation and step tracking
+        function calculateDistanceToNextStep(userLocation) {
+            if (!currentRoute || !currentRoute[0] || !currentRoute[0].legs || currentStepIndex >= routeSteps.length) {
+                return null;
+            }
+
+            try {
+                const currentStep = routeSteps[currentStepIndex];
+                if (!currentStep || !currentStep.maneuver || !currentStep.maneuver.location) {
+                    return null;
+                }
+
+                const stepLocation = currentStep.maneuver.location;
+                const userPoint = turf.point([userLocation.lng, userLocation.lat]);
+                const stepPoint = turf.point(stepLocation);
+                
+                // Calculate distance in feet
+                const distanceMeters = turf.distance(userPoint, stepPoint, {units: 'meters'});
+                const distanceFeet = distanceMeters * 3.28084;
+                
+                return {
+                    distance: distanceFeet,
+                    stepIndex: currentStepIndex,
+                    instruction: currentStep.maneuver.instruction,
+                    stepLocation: stepLocation
+                };
+            } catch (error) {
+                console.warn('Error calculating distance to next step:', error);
+                return null;
+            }
+        }
+
+        function updateDistanceInfo(distanceData) {
+            const distanceInfo = document.getElementById('distance-info');
+            if (distanceData && speechActive) {
+                const distanceFeet = Math.round(distanceData.distance);
+                distanceInfo.textContent = `Next turn in ${distanceFeet} feet`;
+                distanceInfo.classList.remove('hidden');
+            } else {
+                distanceInfo.classList.add('hidden');
+            }
+        }
+
+        function extractRouteSteps(route) {
+            const steps = [];
+            if (route && route[0] && route[0].legs) {
+                route[0].legs.forEach(leg => {
+                    if (leg.steps) {
+                        leg.steps.forEach(step => {
+                            if (step.maneuver && step.maneuver.instruction) {
+                                steps.push({
+                                    maneuver: step.maneuver,
+                                    distance: step.distance,
+                                    duration: step.duration
+                                });
+                            }
+                        });
+                    }
+                });
+            }
+            return steps;
+        }
+
         // Create a hash of instruction content to detect real changes
         function createInstructionHash(text) {
             if (!text) return '';
-            // Normalize text and create simple hash
             const normalized = text.toLowerCase().trim().replace(/\s+/g, ' ');
             let hash = 0;
             for (let i = 0; i < normalized.length; i++) {
                 const char = normalized.charCodeAt(i);
                 hash = ((hash << 5) - hash) + char;
-                hash = hash & hash; // Convert to 32bit integer
+                hash = hash & hash;
             }
             return hash.toString();
         }
 
-        function speakText(text){
-            if(!text || !speechActive) {
-                console.log('Not speaking - text:', !!text, 'speechActive:', speechActive);
+        // Enhanced speech function with queue management
+        function addToSpeechQueue(text, priority = 'normal') {
+            if (!text || !speechActive) return;
+            
+            const speech = {
+                text: text,
+                priority: priority,
+                hash: createInstructionHash(text)
+            };
+            
+            // Check for duplicates
+            if (spokenInstructions.has(speech.hash)) {
+                console.log('BLOCKED: Duplicate speech queued -', text);
                 return;
             }
             
-            // Multiple layers of duplicate prevention
-            const instructionHash = createInstructionHash(text);
+            // Add to queue based on priority
+            if (priority === 'high') {
+                speechQueue.unshift(speech);
+            } else {
+                speechQueue.push(speech);
+            }
+            
+            processSpeechQueue();
+        }
+
+        function processSpeechQueue() {
+            if (isProcessingQueue || speechQueue.length === 0 || !speechActive) return;
+            
+            isProcessingQueue = true;
+            const speech = speechQueue.shift();
+            
+            speakText(speech.text, speech.hash);
+        }
+
+        function speakText(text, instructionHash = null){
+            if(!text || !speechActive) {
+                isProcessingQueue = false;
+                return;
+            }
+            
+            const hash = instructionHash || createInstructionHash(text);
             const trimmedText = text.trim().toLowerCase();
             
-            // Check 1: Hash-based duplicate detection
-            if (spokenInstructions.has(instructionHash)) {
-                console.log('BLOCKED: Hash duplicate -', text);
-                return;
-            }
-            
-            // Check 2: Text-based duplicate detection
-            if (lastSpokenText === trimmedText) {
-                console.log('BLOCKED: Text duplicate -', text);
-                return;
-            }
-            
-            // Check 3: First instruction flag (prevents repeating the very first instruction)
-            if (firstInstructionSpoken && spokenInstructions.size === 1 && 
-                lastSpokenInstructionHash === instructionHash) {
-                console.log('BLOCKED: First instruction repeat -', text);
+            // Enhanced duplicate prevention
+            if (spokenInstructions.has(hash) || lastSpokenText === trimmedText) {
+                console.log('BLOCKED: Duplicate instruction -', text);
+                isProcessingQueue = false;
+                // Continue processing queue
+                setTimeout(processSpeechQueue, 100);
                 return;
             }
             
             console.log('SPEAKING:', text);
             
-            // Set flags before speaking to prevent race conditions
+            // Set flags before speaking
             lastSpokenText = trimmedText;
             if (!firstInstructionSpoken) {
                 firstInstructionSpoken = true;
-                console.log('First instruction flag set');
             }
             
-            // Cancel any ongoing speech more gracefully
+            // Cancel ongoing speech with better timing
             if (window.speechSynthesis.speaking) {
                 window.speechSynthesis.cancel();
-                setTimeout(() => speakTextNow(text, instructionHash), 300);
+                setTimeout(() => speakTextNow(text, hash), 500); // Increased delay
             } else {
-                speakTextNow(text, instructionHash);
+                speakTextNow(text, hash);
             }
         }
         
@@ -212,8 +308,19 @@
             
             const utter = new SpeechSynthesisUtterance(text);
             utter.lang = 'en-US';
-            utter.rate = 0.9;
-            utter.volume = 0.8;
+            utter.rate = 0.8; // Slightly slower for clarity
+            utter.volume = 0.9; // Slightly louder
+            utter.pitch = 1.0;
+            
+            // Try to use a better voice if available
+            const voices = speechSynthesis.getVoices();
+            const preferredVoice = voices.find(voice => 
+                voice.lang.startsWith('en') && (voice.name.includes('Google') || voice.name.includes('Microsoft'))
+            ) || voices.find(voice => voice.lang.startsWith('en'));
+            
+            if (preferredVoice) {
+                utter.voice = preferredVoice;
+            }
             
             utter.onstart = () => {
                 console.log('Speech started:', text);
@@ -225,24 +332,32 @@
             utter.onend = () => {
                 console.log('Speech ended:', text);
                 isCurrentlySpeaking = false;
+                isProcessingQueue = false;
                 
+                // Process next item in queue after a brief pause
+                setTimeout(() => {
+                    processSpeechQueue();
+                }, 500);
+                
+                // Handle pending geofence updates
                 if (pendingGeofenceUpdate && !speechActive) {
                     setTimeout(() => {
                         if (!isCurrentlySpeaking) {
                             updateMessage(pendingGeofenceUpdate);
                             pendingGeofenceUpdate = null;
                         }
-                    }, 500);
+                    }, 1000);
                 }
             };
             
             utter.onerror = (e) => {
-                console.log('Speech error (handled):', e.error);
+                console.log('Speech error:', e.error);
                 isCurrentlySpeaking = false;
+                isProcessingQueue = false;
                 
-                // Don't retry for interrupted errors - they're normal
+                // Continue processing queue even after error
                 if (e.error !== 'interrupted') {
-                    console.warn('Unexpected speech error:', e);
+                    setTimeout(processSpeechQueue, 1000);
                 }
             };
             
@@ -271,38 +386,85 @@
             }
         }
 
+        // Enhanced distance-based instruction monitoring
+        function startDistanceBasedNavigation() {
+            if (!speechActive || !currentRoute) return;
+            
+            console.log('Starting distance-based navigation');
+            
+            // Extract route steps
+            routeSteps = extractRouteSteps(currentRoute);
+            currentStepIndex = 0;
+            nextInstructionTriggered.clear();
+            
+            console.log(`Route has ${routeSteps.length} steps`);
+            
+            // Clear existing monitoring
+            if (distanceCheckInterval) {
+                clearInterval(distanceCheckInterval);
+            }
+            
+            // Start monitoring user distance to next instruction
+            distanceCheckInterval = setInterval(() => {
+                if (!speechActive || !lastUserLocation) return;
+                
+                const distanceData = calculateDistanceToNextStep(lastUserLocation);
+                if (!distanceData) return;
+                
+                // Update distance display
+                updateDistanceInfo(distanceData);
+                
+                const stepKey = `${currentStepIndex}_${distanceData.instruction}`;
+                
+                // Trigger instruction at 300 feet
+                if (distanceData.distance <= INSTRUCTION_TRIGGER_DISTANCE && 
+                    !nextInstructionTriggered.has(stepKey)) {
+                    
+                    console.log(`Triggering instruction at ${Math.round(distanceData.distance)} feet: ${distanceData.instruction}`);
+                    
+                    nextInstructionTriggered.add(stepKey);
+                    updateMessage(distanceData.instruction, 'high');
+                    addToSpeechQueue(distanceData.instruction, 'high');
+                }
+                
+                // Advance to next step when very close (within 50 feet)
+                if (distanceData.distance <= 50) {
+                    const nextStepIndex = currentStepIndex + 1;
+                    if (nextStepIndex < routeSteps.length) {
+                        console.log(`Advancing to step ${nextStepIndex}`);
+                        currentStepIndex = nextStepIndex;
+                    }
+                }
+                
+            }, 2000); // Check every 2 seconds
+        }
+
         function getCurrentInstruction() {
-            // First, try to get the currently active/highlighted step
             const activeStep = document.querySelector('.mapbox-directions-step-active') || 
                               document.querySelector('.mapbox-directions-step.active');
             
             if (activeStep) {
                 const instruction = extractInstructionFromStep(activeStep);
                 if (instruction && instruction.length > 8) {
-                    console.log('✅ Found ACTIVE step instruction:', instruction);
                     return instruction;
                 }
             }
             
-            // Fallback: get the first available step with a valid instruction
             const allSteps = document.querySelectorAll('.mapbox-directions-step');
-            for (let i = 0; i < Math.min(3, allSteps.length); i++) { // Only check first 3 steps
+            for (let i = 0; i < Math.min(3, allSteps.length); i++) {
                 const step = allSteps[i];
                 const instruction = extractInstructionFromStep(step);
                 if (instruction && instruction.length > 8) {
-                    console.log(`✅ Found instruction in step ${i}:`, instruction);
                     return instruction;
                 }
             }
             
-            console.log('❌ No valid instruction found');
             return null;
         }
         
         function extractInstructionFromStep(stepElement) {
             if (!stepElement) return null;
             
-            // Method 1: Look for maneuver instruction elements
             const instructionSelectors = [
                 '.mapbox-directions-step-maneuver-instruction',
                 '.mapboxgl-directions-step-maneuver-instruction',
@@ -320,19 +482,14 @@
                 }
             }
             
-            // Method 2: Extract instruction from step text content
             const stepText = stepElement.textContent.trim();
-            
-            // Split by periods and look for navigation instructions
             const sentences = stepText.split('.').map(s => s.trim()).filter(s => s.length > 0);
             
             for (const sentence of sentences) {
-                // Skip distance/time information
                 if (sentence.match(/^\d+\.?\d*\s*(km|mi|miles?|minutes?|min|ft|feet)/i)) {
                     continue;
                 }
                 
-                // Look for navigation verbs
                 if (sentence.match(/\b(drive|turn|continue|keep|take|merge|exit|head|go|proceed|follow|bear|stay)\b/i) && 
                     sentence.length > 10) {
                     return sentence + '.';
@@ -342,35 +499,23 @@
             return null;
         }
 
-        function getCurrentInstructionFromStep(stepElement) {
-            const instructionSelectors = [
-                '.mapbox-directions-step-maneuver-instruction',
-                '.mapboxgl-directions-step-maneuver-instruction',
-                '.mapbox-directions-instruction'
-            ];
-            
-            for (const selector of instructionSelectors) {
-                const instructionEl = stepElement.querySelector(selector);
-                if (instructionEl && instructionEl.textContent.trim()) {
-                    return instructionEl.textContent.trim();
-                }
-            }
-            
-            return null;
-        }
-
         function startTurnByTurnNavigation() {
             if (!speechActive || !directionsReady) return;
             
-            console.log('Starting turn-by-turn navigation');
+            console.log('Starting enhanced turn-by-turn navigation');
             
-            // Reset tracking variables
+            // Reset all tracking variables
             spokenInstructions.clear();
+            speechQueue = [];
+            isProcessingQueue = false;
             lastSpokenInstructionHash = '';
             lastActiveStepElement = null;
             isCurrentlySpeaking = false;
+            firstInstructionSpoken = false;
+            lastSpokenText = '';
+            nextInstructionTriggered.clear();
             
-            // Clear any existing monitoring
+            // Clear existing monitoring
             if (instructionCheckInterval) {
                 clearInterval(instructionCheckInterval);
                 instructionCheckInterval = null;
@@ -379,106 +524,51 @@
             // Cancel any ongoing speech
             window.speechSynthesis.cancel();
             
-            // Immediately capture the baseline step BEFORE speaking
-            lastActiveStepElement = document.querySelector('.mapbox-directions-step-active') || 
-                                   document.querySelector('.mapbox-directions-step');
-            
-            // Speak the first available instruction immediately
+            // Start with the first instruction
             setTimeout(() => {
                 const firstInstruction = getCurrentInstruction();
                 if (firstInstruction && firstInstruction.length > 8) {
                     console.log('Speaking first instruction:', firstInstruction);
                     updateMessage(firstInstruction, 'high');
-                    speakText(firstInstruction);
-                    
-                    // Wait for speech to be marked as spoken, then start monitoring
-                    setTimeout(() => {
-                        console.log('Starting monitoring after first instruction spoken');
-                        startInstructionMonitoring();
-                    }, 2000);
-                } else {
-                    // No instruction available yet, start monitoring anyway
-                    startInstructionMonitoring();
+                    addToSpeechQueue(firstInstruction, 'high');
                 }
+                
+                // Start distance-based navigation
+                startDistanceBasedNavigation();
+                
             }, 1000);
-        }
-        
-        function startInstructionMonitoring() {
-            console.log('Starting instruction monitoring...');
-            
-            instructionCheckInterval = setInterval(() => {
-                if (!speechActive) {
-                    console.log('Voice disabled, stopping monitoring');
-                    clearInterval(instructionCheckInterval);
-                    instructionCheckInterval = null;
-                    return;
-                }
-                
-                if (isCurrentlySpeaking) {
-                    console.log('Currently speaking, skipping check');
-                    return; // Don't interrupt ongoing speech
-                }
-                
-                // Debug: Log monitoring state
-                console.log('MONITORING CHECK - firstSpoken:', firstInstructionSpoken, 'spokenCount:', spokenInstructions.size);
-                
-                const currentActiveStep = document.querySelector('.mapbox-directions-step-active') || 
-                                         document.querySelector('.mapbox-directions-step');
-                
-                if (!currentActiveStep) {
-                    console.log('No active step found');
-                    return;
-                }
-                
-                // Only check for changes if we have a valid step to compare AND we've already spoken the first instruction
-                if (lastActiveStepElement && firstInstructionSpoken) {
-                    // Check if the active step changed by comparing the actual DOM elements
-                    if (currentActiveStep !== lastActiveStepElement) {
-                        console.log('STEP CHANGED - checking for new instruction');
-                        lastActiveStepElement = currentActiveStep;
-                        
-                        const newInstruction = getCurrentInstruction();
-                        console.log('New step instruction:', newInstruction);
-                        
-                        if (newInstruction && newInstruction.length > 8) {
-                            const instructionHash = createInstructionHash(newInstruction);
-                            
-                            if (!spokenInstructions.has(instructionHash)) {
-                                console.log('SPEAKING new instruction:', newInstruction);
-                                updateMessage(newInstruction, 'high');
-                                speakText(newInstruction);
-                            } else {
-                                console.log('Step changed but instruction already spoken:', newInstruction);
-                            }
-                        }
-                    } else {
-                        console.log('Same step as before - no change');
-                    }
-                } else if (currentActiveStep && !lastActiveStepElement && !firstInstructionSpoken) {
-                    // This shouldn't happen anymore since we set lastActiveStepElement before speaking
-                    console.log('UNEXPECTED: Setting baseline step without first instruction spoken');
-                    lastActiveStepElement = currentActiveStep;
-                }
-                
-            }, 5000); // Increased to 5 seconds to reduce frequency
         }
 
         function stopTurnByTurnNavigation() {
             console.log('Stopping turn-by-turn navigation');
             
+            // Clear all intervals
             if (instructionCheckInterval) {
                 clearInterval(instructionCheckInterval);
                 instructionCheckInterval = null;
             }
             
+            if (distanceCheckInterval) {
+                clearInterval(distanceCheckInterval);
+                distanceCheckInterval = null;
+            }
+            
+            // Cancel speech and reset variables
             window.speechSynthesis.cancel();
             isCurrentlySpeaking = false;
+            isProcessingQueue = false;
+            speechQueue = [];
             spokenInstructions.clear();
             lastSpokenInstructionHash = '';
             lastActiveStepElement = null;
             pendingGeofenceUpdate = null;
-            firstInstructionSpoken = false; // Reset the flag
-            lastSpokenText = ''; // Reset text tracking
+            firstInstructionSpoken = false;
+            lastSpokenText = '';
+            nextInstructionTriggered.clear();
+            currentStepIndex = 0;
+            
+            // Hide distance info
+            document.getElementById('distance-info').classList.add('hidden');
         }
 
         function toggleVoiceNavigation() {
@@ -489,10 +579,10 @@
             if (speechActive) {
                 if (!directionsReady) {
                     updateMessage('Waiting for route to load...', 'high');
-                    speakText('Please wait for the route to load.');
+                    addToSpeechQueue('Please wait for the route to load.');
                 } else {
                     updateMessage('Voice navigation enabled', 'high');
-                    speakText('Voice navigation enabled');
+                    addToSpeechQueue('Voice navigation enabled');
                     
                     setTimeout(() => {
                         startTurnByTurnNavigation();
@@ -506,23 +596,25 @@
             updateVoiceButtonState();
         }
 
-        // Throttled location updates to prevent voice interference
+        // Enhanced location tracking with better timing
         let lastLocationUpdate = 0;
-        const LOCATION_UPDATE_INTERVAL = 2000;
+        const LOCATION_UPDATE_INTERVAL = 1000; // Reduced interval for better responsiveness
 
         function onGeolocationSuccess(pos){
             const now = Date.now();
+            const coords = pos.coords;
+            const userLoc = new mapboxgl.LngLat(coords.longitude, coords.latitude);
             
-            // Throttle location updates when voice is active
+            // Update last user location for distance calculations
+            lastUserLocation = userLoc;
+            
+            // Throttle UI updates when voice is active and speaking
             if (speechActive && isCurrentlySpeaking && (now - lastLocationUpdate) < LOCATION_UPDATE_INTERVAL) {
                 return;
             }
             
             lastLocationUpdate = now;
-            
-            const coords=pos.coords;
-            const userLoc=new mapboxgl.LngLat(coords.longitude,coords.latitude);
-            const userEmail=getUrlParams().email||'testuser@example.com';
+            const userEmail = getUrlParams().email || 'testuser@example.com';
 
             if(!vehicleMarker){
                 const car=document.createElement('div');
@@ -565,22 +657,14 @@
                         const hasDirectionsContainer = document.querySelector('.mapboxgl-ctrl-directions');
                         const hasSteps = document.querySelectorAll('.mapbox-directions-step').length > 0;
                         
-                        console.log(`Readiness check: container=${!!hasDirectionsContainer}, steps=${hasSteps ? document.querySelectorAll('.mapbox-directions-step').length : 0}`);
-                        
                         if (hasDirectionsContainer && hasSteps) {
                             directionsReady = true;
                             updateVoiceButtonState();
                             console.log('Directions UI ready');
                             
-                            // Log all available steps for debugging
-                            const allSteps = document.querySelectorAll('.mapbox-directions-step');
-                            console.log(`Found ${allSteps.length} total steps:`);
-                            allSteps.forEach((step, index) => {
-                                const stepText = step.textContent.trim().substring(0, 60);
-                                const isActive = step.classList.contains('mapbox-directions-step-active') || 
-                                               step.classList.contains('active');
-                                console.log(`  Step ${index}: ${isActive ? '[ACTIVE]' : ''} ${stepText}`);
-                            });
+                            // Extract route steps for distance-based navigation
+                            routeSteps = extractRouteSteps(currentRoute);
+                            console.log(`Route loaded with ${routeSteps.length} steps`);
                             
                             if (speechActive) {
                                 console.log('Voice was already enabled, starting navigation...');
@@ -607,6 +691,7 @@
                     console.log('Route cleared');
                     directionsReady = false;
                     currentRoute = null;
+                    routeSteps = [];
                     stopTurnByTurnNavigation();
                     updateVoiceButtonState();
                 });
@@ -622,8 +707,8 @@
                 directions.setOrigin([coords.longitude,coords.latitude]);
             }
             
-            // Only check geofence if not currently speaking
-            if (!isCurrentlySpeaking) {
+            // Check geofence with reduced frequency during speech
+            if (!isCurrentlySpeaking || (now - lastLocationUpdate) >= LOCATION_UPDATE_INTERVAL) {
                 checkGeofence(userEmail,coords.latitude,coords.longitude);
             }
         }
@@ -669,7 +754,7 @@
             const options = {
                 enableHighAccuracy: geolocationRetries > 0 ? false : true,
                 timeout: geolocationRetries === 0 ? 10000 : 15000,
-                maximumAge: geolocationRetries > 1 ? 60000 : 5000
+                maximumAge: geolocationRetries > 1 ? 60000 : 2000 // Reduced for better real-time tracking
             };
 
             if (navigator.geolocation) {
@@ -725,7 +810,7 @@
             }
 
             updateVoiceButtonState();
-            console.log('App initialized');
+            console.log('App initialized with enhanced voice navigation');
         }
     </script>
 </body>
