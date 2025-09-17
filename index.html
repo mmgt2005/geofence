@@ -462,13 +462,11 @@
             
             routeSteps = extractRouteSteps(currentRoute);
             currentStepIndex = 0;
-            nextInstructionTriggered.clear();
+            // Don't clear nextInstructionTriggered - keep existing triggers to prevent duplicates
             
-            // Clear mobile spoken instructions for new route
+            // Do NOT clear mobile spoken instructions - keep history to prevent repeats
             if (isMobileDevice) {
-                mobileSpokenInstructions.clear();
-                mobileSpeechInProgress = false;
-                console.log('MOBILE: Cleared instruction history for new route');
+                console.log('MOBILE: Preserving instruction history to prevent duplicates');
             }
             
             console.log(`Route has ${routeSteps.length} steps`);
@@ -493,6 +491,7 @@
                 
                 const stepKey = `${currentStepIndex}_${distanceData.instruction}`;
                 
+                // Only trigger if we haven't triggered this specific step+instruction before
                 if (distanceData.distance <= INSTRUCTION_TRIGGER_DISTANCE && 
                     !nextInstructionTriggered.has(stepKey)) {
                     
@@ -528,9 +527,9 @@
             spokenInstructions.clear();
             nextInstructionTriggered.clear();
             
+            // Don't clear mobile instructions - keep the history to prevent duplicates
             if (isMobileDevice) {
-                mobileSpokenInstructions.clear();
-                mobileSpeechInProgress = false;
+                console.log('MOBILE: Keeping existing instruction history to prevent duplicates');
             }
             
             window.speechSynthesis.cancel();
@@ -541,11 +540,16 @@
                     console.log('Speaking first instruction:', firstInstruction);
                     updateMessage(firstInstruction, 'high');
                     speakInstruction(firstInstruction);
+                    
+                    // Mark this instruction as triggered to prevent distance monitoring from repeating it
+                    const stepKey = `${currentStepIndex}_${firstInstruction}`;
+                    nextInstructionTriggered.add(stepKey);
                 }
                 
+                // Wait longer before starting distance monitoring
                 setTimeout(() => {
                     startDistanceBasedNavigation();
-                }, isMobileDevice ? 6000 : 3000);
+                }, isMobileDevice ? 10000 : 3000); // Wait 10 seconds on mobile
                 
             }, 1000);
         }
@@ -585,9 +589,24 @@
                     updateMessage('Voice navigation enabled', 'high');
                     speakInstruction('Voice navigation enabled');
                     
-                    setTimeout(() => {
-                        startTurnByTurnNavigation();
-                    }, isMobileDevice ? 5000 : 2500);
+                    // For mobile: wait much longer and check if speech is finished
+                    if (isMobileDevice) {
+                        const checkMobileSpeechFinished = () => {
+                            if (!mobileSpeechInProgress) {
+                                console.log('MOBILE: Speech finished, starting navigation');
+                                startTurnByTurnNavigation();
+                            } else {
+                                console.log('MOBILE: Still speaking, waiting longer...');
+                                setTimeout(checkMobileSpeechFinished, 2000);
+                            }
+                        };
+                        setTimeout(checkMobileSpeechFinished, 8000); // Wait 8 seconds then check
+                    } else {
+                        // Desktop: shorter delay
+                        setTimeout(() => {
+                            startTurnByTurnNavigation();
+                        }, 2500);
+                    }
                 }
             } else {
                 updateMessage('Voice navigation disabled', 'high', true);
