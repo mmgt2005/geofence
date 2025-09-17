@@ -61,11 +61,11 @@
         let speechStartTime = 0;
         let lastSpeechEndTime = 0;
         
-        // Mobile-specific speech handling - completely isolated
+        // Mobile-specific speech handling - COMPLETELY isolated and protected
         let isMobileDevice = /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-        let mobileSpokenInstructions = new Set();
-        let mobileCurrentlySpeaking = false;
-        let mobileLastSpeechTime = 0;
+        let mobileInstructionsSpoken = new Map(); // Track with full text and timestamps
+        let mobileSpeechLocked = false;
+        let mobileSpeechTimeout = null;
         
         // New variables for distance-based instruction triggering
         const INSTRUCTION_TRIGGER_DISTANCE = 300; // feet
@@ -242,126 +242,140 @@
             return hash.toString();
         }
 
-        // Completely isolated mobile speech function
-        function speakInstructionOnMobile(text) {
+        // ULTRA-PROTECTED mobile speech - no interruptions allowed
+        function mobileSpeechOnly(text) {
             if (!isMobileDevice || !speechActive || !text) return false;
             
-            const instructionHash = createInstructionHash(text);
+            const cleanText = text.trim();
             const now = Date.now();
             
-            // Check if we've already spoken this exact instruction
-            if (mobileSpokenInstructions.has(instructionHash)) {
-                console.log('MOBILE: Already spoken this instruction');
+            // NEVER allow duplicate instructions on mobile
+            if (mobileInstructionsSpoken.has(cleanText)) {
+                const lastTime = mobileInstructionsSpoken.get(cleanText);
+                console.log(`MOBILE BLOCKED: Already spoken "${cleanText}" at ${new Date(lastTime).toLocaleTimeString()}`);
                 return false;
             }
             
-            // Don't speak if currently speaking or too soon after last speech
-            if (mobileCurrentlySpeaking || (now - mobileLastSpeechTime) < 5000) {
-                console.log('MOBILE: Blocked - currently speaking or too soon');
+            // NEVER interrupt ongoing mobile speech
+            if (mobileSpeechLocked) {
+                console.log('MOBILE BLOCKED: Speech locked, cannot interrupt');
                 return false;
             }
             
-            console.log('MOBILE: Speaking instruction -', text);
+            console.log(`MOBILE SPEAKING: "${cleanText}"`);
             
-            // Mark as spoken immediately to prevent duplicates
-            mobileSpokenInstructions.add(instructionHash);
-            mobileCurrentlySpeaking = true;
-            mobileLastSpeechTime = now;
+            // Lock speech immediately and mark as spoken
+            mobileSpeechLocked = true;
+            mobileInstructionsSpoken.set(cleanText, now);
             
-            // Force cancel any existing speech without waiting
+            // Force stop any existing speech
             try {
-                if (window.speechSynthesis.speaking) {
-                    window.speechSynthesis.cancel();
-                }
+                window.speechSynthesis.cancel();
             } catch (e) {
                 console.log('Error cancelling speech:', e);
             }
             
-            // Wait longer before speaking to ensure speech engine is ready
+            // Clear any existing timeout
+            if (mobileSpeechTimeout) {
+                clearTimeout(mobileSpeechTimeout);
+                mobileSpeechTimeout = null;
+            }
+            
+            // Emergency unlock after 20 seconds in case something goes wrong
+            mobileSpeechTimeout = setTimeout(() => {
+                console.log('MOBILE: Emergency speech unlock after 20 seconds');
+                mobileSpeechLocked = false;
+                mobileSpeechTimeout = null;
+            }, 20000);
+            
+            // Wait 2 seconds before attempting speech to ensure engine is ready
             setTimeout(() => {
-                if (!speechActive) {
-                    mobileCurrentlySpeaking = false;
+                if (!speechActive || !mobileSpeechLocked) {
+                    mobileSpeechLocked = false;
                     return;
                 }
                 
                 try {
-                    const utter = new SpeechSynthesisUtterance(text);
-                    utter.lang = 'en-US';
-                    utter.rate = 0.6; // Very slow for mobile
-                    utter.volume = 1.0;
-                    utter.pitch = 1.0;
+                    const utterance = new SpeechSynthesisUtterance(cleanText);
+                    utterance.lang = 'en-US';
+                    utterance.rate = 0.5; // Even slower
+                    utterance.volume = 1.0;
+                    utterance.pitch = 1.0;
                     
-                    // Use default voice to avoid complications
-                    const voices = speechSynthesis.getVoices();
-                    if (voices.length > 0) {
-                        const defaultVoice = voices.find(v => v.default) || voices[0];
-                        utter.voice = defaultVoice;
+                    // Use the most basic voice to avoid complications
+                    const voices = window.speechSynthesis.getVoices();
+                    if (voices && voices.length > 0) {
+                        // Try to find a simple English voice
+                        const simpleVoice = voices.find(v => 
+                            v.lang.includes('en') && !v.name.includes('Enhanced')
+                        ) || voices[0];
+                        utterance.voice = simpleVoice;
                     }
                     
-                    let speechEnded = false;
+                    let speechComplete = false;
                     
-                    utter.onstart = () => {
-                        console.log('MOBILE: Speech actually started');
-                        mobileCurrentlySpeaking = true;
+                    utterance.onstart = function() {
+                        console.log('MOBILE: Speech started successfully');
                     };
                     
-                    utter.onend = () => {
-                        if (!speechEnded) {
-                            speechEnded = true;
-                            console.log('MOBILE: Speech completed successfully');
-                            mobileCurrentlySpeaking = false;
-                            mobileLastSpeechTime = Date.now();
-                        }
-                    };
-                    
-                    utter.onerror = (e) => {
-                        if (!speechEnded) {
-                            speechEnded = true;
-                            console.log('MOBILE: Speech error -', e.error);
-                            mobileCurrentlySpeaking = false;
-                            mobileLastSpeechTime = Date.now();
-                            
-                            // Remove from spoken set if there was an error so it can be retried
-                            if (e.error !== 'interrupted') {
-                                mobileSpokenInstructions.delete(instructionHash);
+                    utterance.onend = function() {
+                        if (!speechComplete) {
+                            speechComplete = true;
+                            console.log('MOBILE: Speech completed normally');
+                            mobileSpeechLocked = false;
+                            if (mobileSpeechTimeout) {
+                                clearTimeout(mobileSpeechTimeout);
+                                mobileSpeechTimeout = null;
                             }
                         }
                     };
                     
-                    // Additional timeout as backup
-                    setTimeout(() => {
-                        if (mobileCurrentlySpeaking && !speechEnded) {
-                            speechEnded = true;
-                            console.log('MOBILE: Speech timeout - forcing end');
-                            mobileCurrentlySpeaking = false;
-                            mobileLastSpeechTime = Date.now();
+                    utterance.onerror = function(event) {
+                        if (!speechComplete) {
+                            speechComplete = true;
+                            console.log('MOBILE: Speech error occurred:', event.error);
+                            mobileSpeechLocked = false;
+                            if (mobileSpeechTimeout) {
+                                clearTimeout(mobileSpeechTimeout);
+                                mobileSpeechTimeout = null;
+                            }
+                            
+                            // Only remove from spoken list if it was a real error (not interruption)
+                            if (event.error === 'network' || event.error === 'synthesis-failed') {
+                                mobileInstructionsSpoken.delete(cleanText);
+                            }
                         }
-                    }, 15000); // 15 second timeout
+                    };
                     
-                    window.speechSynthesis.speak(utter);
+                    // Attempt to speak
+                    window.speechSynthesis.speak(utterance);
                     
                 } catch (error) {
-                    console.error('MOBILE: Error creating speech:', error);
-                    mobileCurrentlySpeaking = false;
-                    mobileSpokenInstructions.delete(instructionHash);
+                    console.error('MOBILE: Critical speech error:', error);
+                    mobileSpeechLocked = false;
+                    mobileInstructionsSpoken.delete(cleanText);
+                    if (mobileSpeechTimeout) {
+                        clearTimeout(mobileSpeechTimeout);
+                        mobileSpeechTimeout = null;
+                    }
                 }
                 
-            }, 1000); // Wait 1 second before speaking
+            }, 2000); // Wait 2 full seconds
             
             return true;
         }
 
-        // Enhanced speech function with complete mobile isolation
+        // Speech routing function - mobile gets special treatment
         function addToSpeechQueue(text, priority = 'normal') {
             if (!text || !speechActive) return;
             
-            // Use completely isolated mobile speech
+            // Mobile devices ONLY use the protected speech function
             if (isMobileDevice) {
-                speakInstructionOnMobile(text);
+                mobileSpeechOnly(text);
                 return;
             }
             
-            // Desktop queue management (existing logic)
+            // Desktop queue management (unchanged - working perfectly)
             const now = Date.now();
             const normalizedText = text.toLowerCase().trim();
             
@@ -437,13 +451,13 @@
         }
 
         function speakText(text, instructionHash = null){
-            // Mobile devices use completely isolated speech
+            // Mobile devices ONLY use the ultra-protected speech
             if (isMobileDevice) {
-                speakInstructionOnMobile(text);
+                mobileSpeechOnly(text);
                 return;
             }
             
-            // Desktop speech handling (existing logic)
+            // Desktop speech handling (unchanged - working perfectly)
             if(!text || !speechActive) {
                 isProcessingQueue = false;
                 return;
@@ -582,7 +596,7 @@
             }
         }
 
-        // Enhanced distance-based instruction monitoring with mobile protection
+        // Enhanced distance-based instruction monitoring with FULL mobile protection
         function startDistanceBasedNavigation() {
             if (!speechActive || !currentRoute) return;
             
@@ -593,9 +607,14 @@
             currentStepIndex = 0;
             nextInstructionTriggered.clear();
             
-            // Clear mobile spoken instructions when starting new route
+            // CLEAR all mobile speech history when starting new route
             if (isMobileDevice) {
-                mobileSpokenInstructions.clear();
+                mobileInstructionsSpoken.clear();
+                mobileSpeechLocked = false;
+                if (mobileSpeechTimeout) {
+                    clearTimeout(mobileSpeechTimeout);
+                    mobileSpeechTimeout = null;
+                }
             }
             
             console.log(`Route has ${routeSteps.length} steps`);
@@ -609,16 +628,16 @@
             distanceCheckInterval = setInterval(() => {
                 if (!speechActive || !lastUserLocation) return;
                 
-                // Skip distance checking if mobile is currently speaking
-                if (isMobileDevice && mobileCurrentlySpeaking) {
-                    console.log('MOBILE: Skipping distance check - currently speaking');
+                // COMPLETELY SKIP distance checking if mobile is speaking
+                if (isMobileDevice && mobileSpeechLocked) {
+                    console.log('MOBILE: Skipping ALL distance monitoring - speech locked');
                     return;
                 }
                 
                 const distanceData = calculateDistanceToNextStep(lastUserLocation);
                 if (!distanceData) return;
                 
-                // Update distance display
+                // Update distance display (but don't interfere with speech)
                 updateDistanceInfo(distanceData);
                 
                 const stepKey = `${currentStepIndex}_${distanceData.instruction}`;
@@ -630,11 +649,15 @@
                     console.log(`Triggering instruction at ${Math.round(distanceData.distance)} feet: ${distanceData.instruction}`);
                     
                     nextInstructionTriggered.add(stepKey);
-                    updateMessage(distanceData.instruction, 'high');
                     
-                    // For mobile, use the isolated speech function directly
+                    // Update message but don't interfere with speech on mobile
+                    if (!isMobileDevice || !mobileSpeechLocked) {
+                        updateMessage(distanceData.instruction, 'high');
+                    }
+                    
+                    // Speech handling
                     if (isMobileDevice) {
-                        speakInstructionOnMobile(distanceData.instruction);
+                        mobileSpeechOnly(distanceData.instruction);
                     } else {
                         addToSpeechQueue(distanceData.instruction, 'high');
                     }
@@ -649,7 +672,7 @@
                     }
                 }
                 
-            }, isMobileDevice ? 3000 : 2000); // Slower checking on mobile
+            }, isMobileDevice ? 5000 : 2000); // Much slower checking on mobile
         }
 
         function getCurrentInstruction() {
@@ -728,6 +751,16 @@
             lastSpokenText = '';
             nextInstructionTriggered.clear();
             
+            // COMPLETELY reset mobile speech system
+            if (isMobileDevice) {
+                mobileInstructionsSpoken.clear();
+                mobileSpeechLocked = false;
+                if (mobileSpeechTimeout) {
+                    clearTimeout(mobileSpeechTimeout);
+                    mobileSpeechTimeout = null;
+                }
+            }
+            
             // Clear existing monitoring
             if (instructionCheckInterval) {
                 clearInterval(instructionCheckInterval);
@@ -737,17 +770,27 @@
             // Cancel any ongoing speech
             window.speechSynthesis.cancel();
             
-            // Start with the first instruction
+            // Start with the first instruction - but handle mobile specially
             setTimeout(() => {
                 const firstInstruction = getCurrentInstruction();
                 if (firstInstruction && firstInstruction.length > 8) {
                     console.log('Speaking first instruction:', firstInstruction);
-                    updateMessage(firstInstruction, 'high');
-                    addToSpeechQueue(firstInstruction, 'high');
+                    
+                    if (isMobileDevice) {
+                        // For mobile, speak the first instruction with our protected function
+                        updateMessage(firstInstruction, 'high');
+                        mobileSpeechOnly(firstInstruction);
+                    } else {
+                        // Desktop uses queue system
+                        updateMessage(firstInstruction, 'high');
+                        addToSpeechQueue(firstInstruction, 'high');
+                    }
                 }
                 
                 // Start distance-based navigation
-                startDistanceBasedNavigation();
+                setTimeout(() => {
+                    startDistanceBasedNavigation();
+                }, isMobileDevice ? 5000 : 2000); // Wait longer on mobile
                 
             }, 1000);
         }
@@ -782,6 +825,20 @@
             recentInstructions.clear();
             speechStartTime = 0;
             lastSpeechEndTime = 0;
+            
+            // COMPLETELY reset mobile speech system
+            if (isMobileDevice) {
+                mobileInstructionsSpoken.clear();
+                mobileSpeechLocked = false;
+                if (mobileSpeechTimeout) {
+                    clearTimeout(mobileSpeechTimeout);
+                    mobileSpeechTimeout = null;
+                }
+            }
+            
+            // Hide distance info
+            document.getElementById('distance-info').classList.add('hidden');
+        }
             
             // Reset mobile-specific variables
             mobileSpokenInstructions.clear();
