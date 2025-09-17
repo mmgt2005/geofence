@@ -131,75 +131,123 @@
             }
         }
 
-        // Simple mobile speech function - no interruptions allowed
+        // Simple mobile speech function - MAXIMUM protection
         function speakOnMobile(text) {
             if (!isMobileDevice || !speechActive || !text) return;
             
             const cleanText = text.trim();
             const now = Date.now();
             
-            // Check if already spoken
+            // NEVER speak the same thing twice
             if (mobileSpokenInstructions.has(cleanText)) {
-                console.log('MOBILE: Already spoken -', cleanText);
+                console.log('MOBILE BLOCKED: Already spoken -', cleanText);
                 return;
             }
             
-            // Don't interrupt ongoing speech
+            // NEVER interrupt ongoing speech
             if (mobileSpeechInProgress) {
-                console.log('MOBILE: Speech in progress, skipping -', cleanText);
+                console.log('MOBILE BLOCKED: Speech in progress');
                 return;
             }
             
-            console.log('MOBILE: Speaking -', cleanText);
+            // NEVER speak too soon after previous speech
+            const lastSpeechTime = Array.from(mobileSpokenInstructions.values()).pop() || 0;
+            if (now - lastSpeechTime < 8000) { // 8 second minimum gap
+                console.log('MOBILE BLOCKED: Too soon after last speech');
+                return;
+            }
+            
+            console.log('MOBILE SPEAKING:', cleanText);
+            
+            // Lock immediately and permanently mark as spoken
             mobileSpeechInProgress = true;
             mobileSpokenInstructions.set(cleanText, now);
             
-            // Cancel any existing speech
+            // FORCE stop everything
             if (window.speechSynthesis.speaking) {
                 window.speechSynthesis.cancel();
             }
             
+            // Wait much longer before attempting speech
             setTimeout(() => {
-                if (!speechActive) {
+                if (!speechActive || !mobileSpeechInProgress) {
                     mobileSpeechInProgress = false;
                     return;
                 }
                 
-                const utterance = new SpeechSynthesisUtterance(cleanText);
-                utterance.lang = 'en-US';
-                utterance.rate = 0.6;
-                utterance.volume = 1.0;
-                
-                utterance.onstart = () => {
-                    console.log('MOBILE: Speech started');
-                    mobileSpeechInProgress = true;
-                };
-                
-                utterance.onend = () => {
-                    console.log('MOBILE: Speech ended');
-                    mobileSpeechInProgress = false;
-                };
-                
-                utterance.onerror = (e) => {
-                    console.log('MOBILE: Speech error -', e.error);
-                    mobileSpeechInProgress = false;
-                    // Remove from spoken list if error wasn't interruption
-                    if (e.error !== 'interrupted') {
-                        mobileSpokenInstructions.delete(cleanText);
+                try {
+                    const utterance = new SpeechSynthesisUtterance(cleanText);
+                    utterance.lang = 'en-US';
+                    utterance.rate = 0.4; // Even slower
+                    utterance.volume = 1.0;
+                    utterance.pitch = 1.0;
+                    
+                    // Use simplest voice available
+                    const voices = window.speechSynthesis.getVoices();
+                    if (voices && voices.length > 0) {
+                        const basicVoice = voices.find(v => v.lang.startsWith('en') && v.localService) || voices[0];
+                        utterance.voice = basicVoice;
                     }
-                };
+                    
+                    let speechFinished = false;
+                    
+                    utterance.onstart = function() {
+                        console.log('MOBILE: Speech ACTUALLY started');
+                        mobileSpeechInProgress = true;
+                    };
+                    
+                    utterance.onend = function() {
+                        if (!speechFinished) {
+                            speechFinished = true;
+                            console.log('MOBILE: Speech completed normally');
+                            mobileSpeechInProgress = false;
+                        }
+                    };
+                    
+                    utterance.onerror = function(event) {
+                        if (!speechFinished) {
+                            speechFinished = true;
+                            console.log('MOBILE: Speech error -', event.error);
+                            mobileSpeechInProgress = false;
+                            
+                            // Only remove from history if it was a real failure
+                            if (event.error === 'synthesis-failed' || event.error === 'network') {
+                                mobileSpokenInstructions.delete(cleanText);
+                                console.log('MOBILE: Removed from history due to error');
+                            }
+                        }
+                    };
+                    
+                    // Multiple safety timeouts
+                    setTimeout(() => {
+                        if (mobileSpeechInProgress && !speechFinished) {
+                            speechFinished = true;
+                            console.log('MOBILE: 20 second timeout - forcing end');
+                            mobileSpeechInProgress = false;
+                            window.speechSynthesis.cancel();
+                        }
+                    }, 20000);
+                    
+                    setTimeout(() => {
+                        if (mobileSpeechInProgress && !speechFinished) {
+                            speechFinished = true;
+                            console.log('MOBILE: 30 second emergency timeout');
+                            mobileSpeechInProgress = false;
+                            window.speechSynthesis.cancel();
+                        }
+                    }, 30000);
+                    
+                    // Attempt speech
+                    console.log('MOBILE: Attempting to speak now');
+                    window.speechSynthesis.speak(utterance);
+                    
+                } catch (error) {
+                    console.error('MOBILE: Critical error in speech creation:', error);
+                    mobileSpeechInProgress = false;
+                    mobileSpokenInstructions.delete(cleanText);
+                }
                 
-                window.speechSynthesis.speak(utterance);
-                
-                // Emergency timeout
-                setTimeout(() => {
-                    if (mobileSpeechInProgress) {
-                        console.log('MOBILE: Emergency timeout');
-                        mobileSpeechInProgress = false;
-                    }
-                }, 15000);
-                
-            }, 1000);
+            }, 3000); // Wait 3 full seconds before attempting
         }
 
         // Desktop speech function
@@ -420,6 +468,7 @@
             if (isMobileDevice) {
                 mobileSpokenInstructions.clear();
                 mobileSpeechInProgress = false;
+                console.log('MOBILE: Cleared instruction history for new route');
             }
             
             console.log(`Route has ${routeSteps.length} steps`);
@@ -431,8 +480,9 @@
             distanceCheckInterval = setInterval(() => {
                 if (!speechActive || !lastUserLocation) return;
                 
-                // Skip if mobile is speaking
+                // COMPLETELY skip distance monitoring if mobile is speaking
                 if (isMobileDevice && mobileSpeechInProgress) {
+                    console.log('MOBILE: Skipping distance check - speech locked');
                     return;
                 }
                 
@@ -449,7 +499,12 @@
                     console.log(`Triggering instruction at ${Math.round(distanceData.distance)} feet: ${distanceData.instruction}`);
                     
                     nextInstructionTriggered.add(stepKey);
-                    updateMessage(distanceData.instruction, 'high');
+                    
+                    // Don't update message if mobile is speaking
+                    if (!(isMobileDevice && mobileSpeechInProgress)) {
+                        updateMessage(distanceData.instruction, 'high');
+                    }
+                    
                     speakInstruction(distanceData.instruction);
                 }
                 
@@ -461,7 +516,7 @@
                     }
                 }
                 
-            }, isMobileDevice ? 5000 : 2000);
+            }, isMobileDevice ? 10000 : 2000); // Much slower monitoring on mobile (10 seconds)
         }
 
         function startTurnByTurnNavigation() {
@@ -610,6 +665,7 @@
                 directions.setOrigin([coords.longitude,coords.latitude]);
             }
             
+            // NEVER check geofence if mobile speech is in progress
             if (!(isMobileDevice && mobileSpeechInProgress) && !isCurrentlySpeaking) {
                 checkGeofence(userEmail,coords.latitude,coords.longitude);
             }
