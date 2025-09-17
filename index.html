@@ -125,14 +125,14 @@
             
             if (lastSpokenTime && (now - lastSpokenTime) < SPEECH_COOLDOWN) {
                 console.log('Skipping (too recent):', text);
+                updateMessage(text); // Still update display
                 return false;
             }
             
             // Check if this exact instruction was ever spoken in this session
             if (spokenInstructionsHistory.has(normalizedText)) {
                 console.log('Skipping (already in history):', text);
-                // But still update the display
-                updateMessage(text);
+                updateMessage(text); // Still update display
                 return false;
             }
             
@@ -369,12 +369,49 @@
                 // Cancel any existing speech first
                 window.speechSynthesis.cancel();
                 
-                // Speak announcement and queue first instruction
+                // Speak announcement with a callback for when it ends
                 try {
                     const announcement = new SpeechSynthesisUtterance('Voice navigation enabled');
                     announcement.rate = isMobileDevice ? 0.9 : 1.0;
+                    
+                    announcement.onend = () => {
+                        console.log('Announcement finished, adding brief pause...');
+                        
+                        // Brief pause after announcement (matching desktop behavior)
+                        setTimeout(() => {
+                            if (directionsReady && speechActive) {
+                                const firstInstruction = getCurrentInstruction();
+                                if (firstInstruction && firstInstruction.length > 8) {
+                                    console.log('Speaking first instruction after pause:', firstInstruction);
+                                    speakText(firstInstruction);
+                                    
+                                    // Start distance monitoring after first instruction
+                                    setTimeout(() => {
+                                        startDistanceBasedNavigation();
+                                    }, 3000);
+                                }
+                            }
+                        }, 800); // Brief 800ms pause matching desktop
+                    };
+                    
+                    announcement.onerror = (e) => {
+                        console.error('Announcement error:', e);
+                        // Fallback: try to speak first instruction anyway
+                        if (directionsReady && speechActive) {
+                            setTimeout(() => {
+                                const firstInstruction = getCurrentInstruction();
+                                if (firstInstruction) {
+                                    speakText(firstInstruction);
+                                    setTimeout(() => {
+                                        startDistanceBasedNavigation();
+                                    }, 3000);
+                                }
+                            }, 2000);
+                        }
+                    };
+                    
                     window.speechSynthesis.speak(announcement);
-                    console.log('Announcement queued');
+                    console.log('Announcement started');
                     
                 } catch (e) {
                     console.error('Error with announcement:', e);
@@ -384,20 +421,6 @@
                     setTimeout(() => {
                         updateMessage('Waiting for route to load...');
                     }, 2000);
-                } else {
-                    // Wait a bit then speak first instruction (it will queue after announcement)
-                    setTimeout(() => {
-                        const firstInstruction = getCurrentInstruction();
-                        if (firstInstruction && firstInstruction.length > 8) {
-                            console.log('Queueing first instruction:', firstInstruction);
-                            speakText(firstInstruction);
-                        }
-                        
-                        // Start distance monitoring later
-                        setTimeout(() => {
-                            startDistanceBasedNavigation();
-                        }, 5000);
-                    }, 1000);
                 }
             } else {
                 updateMessage('Voice navigation disabled');
