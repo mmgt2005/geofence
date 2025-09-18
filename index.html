@@ -51,8 +51,8 @@
         
         // Speech variables - improved duplicate prevention
         let isMobileDevice = /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-        let recentlySpoken = new Map(); // Track when each instruction was last spoken
-        const SPEECH_COOLDOWN = 8000; // Don't repeat same instruction within 8 seconds
+        let recentlySpoken = new Map();
+        const SPEECH_COOLDOWN = 8000;
         
         // Navigation variables
         const INSTRUCTION_TRIGGER_DISTANCE = 300;
@@ -60,7 +60,7 @@
         let currentStepIndex = 0;
         let lastUserLocation = null;
         let distanceCheckInterval = null;
-        let firstInstructionSpoken = false; // Track if we've spoken the first instruction
+        let firstInstructionSpoken = false;
 
         console.log('Variables initialized, mobile:', isMobileDevice);
 
@@ -73,12 +73,88 @@
         }
 
         async function sendWebhook(status,email,latitude,longitude){
-            if(!WEBHOOK_URL) return;
-            try{
-                const data={status,latitude,longitude,email,job:jobTitle,timestamp:new Date().toISOString()};
-                const r=await fetch(WEBHOOK_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
-                if(!r.ok)console.error('Webhook failed',r.status);
-            }catch(e){console.error('Error sending webhook:',e);}
+            if(!WEBHOOK_URL) {
+                console.error('No webhook URL configured');
+                return false;
+            }
+            
+            const data = {
+                status: status,
+                latitude: latitude,
+                longitude: longitude,
+                email: email,
+                job: jobTitle || 'Unknown Job',
+                timestamp: new Date().toISOString(),
+                userAgent: navigator.userAgent,
+                isMobile: isMobileDevice
+            };
+            
+            console.log('Sending webhook:', status, 'to:', WEBHOOK_URL);
+            console.log('Data:', JSON.stringify(data, null, 2));
+            
+            // Try up to 3 times with increasing timeouts
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    console.log(`Webhook attempt ${attempt}/3`);
+                    
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 10000 + (attempt * 5000)); // 10s, 15s, 20s
+                    
+                    const response = await fetch(WEBHOOK_URL, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json'
+                        },
+                        body: JSON.stringify(data),
+                        signal: controller.signal
+                    });
+                    
+                    clearTimeout(timeoutId);
+                    
+                    console.log('Response status:', response.status);
+                    console.log('Response ok:', response.ok);
+                    
+                    if (response.ok) {
+                        console.log('✅ Webhook sent successfully:', status);
+                        try {
+                            const responseText = await response.text();
+                            console.log('Response body:', responseText);
+                        } catch (e) {
+                            console.log('Could not read response body');
+                        }
+                        return true;
+                    } else {
+                        console.error(`❌ Webhook failed with status ${response.status}`);
+                        if (attempt === 3) {
+                            try {
+                                const errorText = await response.text();
+                                console.error('Error response:', errorText);
+                            } catch (e) {
+                                console.error('Could not read error response');
+                            }
+                        }
+                    }
+                } catch (error) {
+                    console.error(`❌ Webhook attempt ${attempt} failed:`, error.message);
+                    
+                    if (error.name === 'AbortError') {
+                        console.error('Request timed out');
+                    } else if (error.message.includes('network') || error.message.includes('fetch')) {
+                        console.error('Network error - check internet connection');
+                    }
+                    
+                    if (attempt === 3) {
+                        console.error('All webhook attempts failed');
+                        return false;
+                    }
+                    
+                    // Wait before retry
+                    await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+                }
+            }
+            
+            return false;
         }
 
         function updateMessage(text) {
@@ -98,11 +174,13 @@
             }
 
             if(inside&&!isInsideGeofence){
+                console.log('🎯 Vehicle entered geofence');
                 sendWebhook('inside',email,latitude,longitude);
                 isInsideGeofence=true;
                 updateMessage('Vehicle is at the job location!');
             }
             else if(!inside&&isInsideGeofence){
+                console.log('🚗 Vehicle left geofence');
                 sendWebhook('outside',email,latitude,longitude);
                 isInsideGeofence=false;
                 updateMessage('Vehicle has left the job location!');
@@ -112,33 +190,24 @@
             }
         }
 
-        // Improved speech function with better duplicate prevention
         function speakText(text) {
             if (!speechActive || !text) return false;
             
-            // Normalize the text for comparison
             const normalizedText = text.toLowerCase().replace(/[^\w\s]/g, '').trim();
-            
-            // Check if we've recently spoken this (but allow repeats after cooldown)
             const lastSpokenTime = recentlySpoken.get(normalizedText);
             const now = Date.now();
             
             if (lastSpokenTime && (now - lastSpokenTime) < SPEECH_COOLDOWN) {
                 console.log('Skipping (too recent):', text.substring(0, 30));
-                updateMessage(text); // Still update display
+                updateMessage(text);
                 return false;
             }
             
             console.log('Speaking instruction:', text.substring(0, 50));
-            
-            // Mark as spoken
             recentlySpoken.set(normalizedText, now);
-            
-            // Update display immediately
             updateMessage(text);
             
             try {
-                // Cancel any pending speech to prioritize new instruction
                 window.speechSynthesis.cancel();
                 
                 const utterance = new SpeechSynthesisUtterance(text);
@@ -163,7 +232,6 @@
             }
         }
 
-        // Extract route steps for navigation
         function extractRouteSteps(route) {
             const steps = [];
             if (route && route[0] && route[0].legs) {
@@ -184,7 +252,6 @@
             return steps;
         }
 
-        // Calculate distance to next turn
         function calculateDistanceToNextStep(userLocation) {
             if (!currentRoute || !currentRoute[0] || !routeSteps || currentStepIndex >= routeSteps.length) {
                 return null;
@@ -215,7 +282,6 @@
             }
         }
 
-        // Update distance display
         function updateDistanceInfo(distanceData) {
             const distanceInfo = document.getElementById('distance-info');
             if (distanceData && speechActive) {
@@ -227,11 +293,9 @@
             }
         }
 
-        // Improved function to get current instruction with multiple fallback methods
         function getCurrentInstruction() {
             console.log('Getting current instruction...');
             
-            // Method 1: Try to get from routeSteps directly (most reliable)
             if (routeSteps && routeSteps.length > 0 && currentStepIndex < routeSteps.length) {
                 const instruction = routeSteps[currentStepIndex]?.maneuver?.instruction;
                 if (instruction && instruction.length > 5) {
@@ -240,7 +304,6 @@
                 }
             }
             
-            // Method 2: Try DOM elements with multiple selectors
             const stepSelectors = [
                 '.mapbox-directions-step-active',
                 '.mapbox-directions-step.active',
@@ -260,7 +323,6 @@
                 }
             }
             
-            // Method 3: Get first available instruction from any step
             const allSteps = document.querySelectorAll('.mapbox-directions-step, .mapboxgl-directions-step');
             for (let i = 0; i < Math.min(3, allSteps.length); i++) {
                 const step = allSteps[i];
@@ -289,14 +351,12 @@
                 const instructionEl = stepElement.querySelector(selector);
                 if (instructionEl) {
                     const text = instructionEl.textContent.trim();
-                    // Filter out distance/time only text
                     if (text.length > 5 && !text.match(/^\d+\.?\d*\s*(km|mi|ft|miles?|minutes?|min|sec)/i)) {
                         return text;
                     }
                 }
             }
             
-            // Fallback: try getting text content directly
             const text = stepElement.textContent.trim();
             const lines = text.split('\n').filter(line => line.trim().length > 5);
             for (const line of lines) {
@@ -308,7 +368,6 @@
             return null;
         }
 
-        // Distance-based navigation monitoring
         function startDistanceBasedNavigation() {
             if (!speechActive || !currentRoute) return;
             
@@ -331,12 +390,10 @@
                 
                 updateDistanceInfo(distanceData);
                 
-                // Only speak if we're close enough
                 if (distanceData.distance <= INSTRUCTION_TRIGGER_DISTANCE) {
                     speakText(distanceData.instruction);
                 }
                 
-                // Move to next step when very close
                 if (distanceData.distance <= 50) {
                     const nextStepIndex = currentStepIndex + 1;
                     if (nextStepIndex < routeSteps.length) {
@@ -345,12 +402,11 @@
                     }
                 }
                 
-            }, 3000); // Check every 3 seconds
+            }, 3000);
         }
 
-        // Function to attempt speaking first instruction with retries
         function attemptFirstInstruction(retryCount = 0) {
-            const maxRetries = 8; // Try for up to 16 seconds
+            const maxRetries = 8;
             
             if (retryCount >= maxRetries || !speechActive || firstInstructionSpoken) {
                 if (retryCount >= maxRetries) {
@@ -362,15 +418,12 @@
             
             console.log(`Attempting to get first instruction (attempt ${retryCount + 1})`);
             
-            // Try multiple methods to get instruction
             let instruction = null;
             
-            // Check if we have route steps
             if (routeSteps && routeSteps.length > 0) {
                 instruction = routeSteps[0]?.maneuver?.instruction;
             }
             
-            // If no instruction from route steps, try DOM
             if (!instruction) {
                 instruction = getCurrentInstruction();
             }
@@ -380,21 +433,18 @@
                 firstInstructionSpoken = true;
                 speakText(instruction);
                 
-                // Start distance monitoring after first instruction
                 setTimeout(() => {
                     if (speechActive) {
                         startDistanceBasedNavigation();
                     }
                 }, 2000);
             } else {
-                // Retry after a short delay
                 setTimeout(() => {
                     attemptFirstInstruction(retryCount + 1);
                 }, 2000);
             }
         }
 
-        // Stop navigation
         function stopTurnByTurnNavigation() {
             console.log('Stopping turn-by-turn navigation');
             
@@ -427,40 +477,32 @@
             speechActive = !speechActive;
             
             if (speechActive) {
-                // Reset navigation state
                 recentlySpoken.clear();
                 firstInstructionSpoken = false;
                 currentStepIndex = 0;
                 
                 updateMessage('Voice navigation enabled');
-                
-                // Cancel any existing speech first
                 window.speechSynthesis.cancel();
                 
-                // Speak announcement
                 try {
                     const announcement = new SpeechSynthesisUtterance('Voice navigation enabled');
                     announcement.rate = isMobileDevice ? 0.9 : 1.0;
                     
                     announcement.onend = () => {
                         console.log('Announcement finished');
-                        
-                        // Wait a bit then try to get first instruction
                         setTimeout(() => {
                             if (speechActive && directionsReady) {
                                 console.log('Starting first instruction attempt');
                                 attemptFirstInstruction();
                             } else if (speechActive) {
                                 updateMessage('Waiting for route to load...');
-                                // Keep trying even if directionsReady is false
                                 attemptFirstInstruction();
                             }
-                        }, 1000); // 1 second pause after announcement
+                        }, 1000);
                     };
                     
                     announcement.onerror = (e) => {
                         console.error('Announcement error:', e);
-                        // Fallback: try to get first instruction anyway
                         setTimeout(() => {
                             if (speechActive) {
                                 attemptFirstInstruction();
@@ -472,7 +514,6 @@
                     
                 } catch (e) {
                     console.error('Error with announcement:', e);
-                    // Fallback without announcement
                     setTimeout(() => {
                         if (speechActive) {
                             attemptFirstInstruction();
@@ -524,21 +565,19 @@
                     currentRoute = e.route;
                     routeSteps = extractRouteSteps(currentRoute);
                     
-                    // Wait for directions UI to be ready
                     setTimeout(() => {
                         const hasSteps = document.querySelectorAll('.mapbox-directions-step, .mapboxgl-directions-step').length > 0;
                         console.log('Checking directions UI ready:', hasSteps, 'steps found:', document.querySelectorAll('.mapbox-directions-step, .mapboxgl-directions-step').length);
                         
-                        directionsReady = true; // Set to true regardless - we have the route data
+                        directionsReady = true;
                         console.log(`Route ready with ${routeSteps.length} steps from route data`);
                         
-                        // If voice is active and we haven't spoken first instruction yet, start trying
                         if (speechActive && !firstInstructionSpoken) {
                             console.log('Voice active and route ready - attempting first instruction');
                             attemptFirstInstruction();
                         }
                         
-                    }, 1500); // Reduced wait time
+                    }, 1500);
                 });
             }
             
@@ -574,7 +613,6 @@
             }
         }
 
-        // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             console.log('DOM loaded');
             
@@ -624,16 +662,71 @@
                 updateMessage('Map failed to load');
             });
 
-            document.getElementById('arrived-button').addEventListener('click', () => {
+            document.getElementById('arrived-button').addEventListener('click', async () => {
                 const userEmail = getUrlParams().email || 'testuser@example.com';
                 const loc = vehicleMarker ? vehicleMarker.getLngLat() : {lat: 0, lng: 0};
-                sendWebhook('complete', userEmail, loc.lat, loc.lng);
-                updateMessage('Job Complete!');
+                
+                const button = document.getElementById('arrived-button');
+                button.disabled = true;
+                button.textContent = 'Completing...';
+                button.className = 'bg-gray-500 text-white font-bold py-2 px-4 rounded-lg shadow-md cursor-not-allowed';
+                
+                try {
+                    console.log('🏁 Attempting to send completion webhook...');
+                    const webhookSuccess = await sendWebhook('complete', userEmail, loc.lat, loc.lng);
+                    
+                    if (webhookSuccess) {
+                        updateMessage('Job Complete! Window will close in 3 seconds...');
+                        
+                        let countdown = 3;
+                        const countdownInterval = setInterval(() => {
+                            countdown--;
+                            if (countdown > 0) {
+                                updateMessage(`Job Complete! Window will close in ${countdown} seconds...`);
+                            } else {
+                                updateMessage('Job Complete! Closing now...');
+                                clearInterval(countdownInterval);
+                            }
+                        }, 1000);
+                        
+                        setTimeout(() => {
+                            console.log('Attempting to close window...');
+                            
+                            try {
+                                window.close();
+                            } catch (e) {
+                                console.log('Standard window.close() failed:', e);
+                            }
+                            
+                            try {
+                                window.location.href = 'about:blank';
+                            } catch (e) {
+                                console.log('Redirect to about:blank failed:', e);
+                            }
+                            
+                            updateMessage('Job Complete! Please close this window manually.');
+                            
+                        }, 3000);
+                    } else {
+                        updateMessage('Job marked complete, but webhook delivery failed. Please check network connection.');
+                        button.disabled = false;
+                        button.textContent = 'Retry Complete';
+                        button.className = 'bg-orange-500 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-orange-600 transition-colors';
+                    }
+                    
+                } catch (error) {
+                    console.error('❌ Error completing job:', error);
+                    updateMessage('Error completing job. Check network and try again.');
+                    
+                    button.disabled = false;
+                    button.textContent = 'Job Complete';
+                    button.className = 'bg-green-500 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-green-600 transition-colors';
+                }
             });
 
             updateVoiceButtonState();
             console.log('Initialization complete');
-        }
+        };
     </script>
 </body>
 </html>
