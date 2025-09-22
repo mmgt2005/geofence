@@ -54,8 +54,8 @@
         let recentlySpoken = new Map();
         const SPEECH_COOLDOWN = 8000;
         
-        // Navigation variables
-        const INSTRUCTION_TRIGGER_DISTANCE = 300;
+        // Navigation variables - UPDATED TO 1000 FEET
+        const INSTRUCTION_TRIGGER_DISTANCE = 1000;
         let routeSteps = [];
         let currentStepIndex = 0;
         let lastUserLocation = null;
@@ -284,7 +284,8 @@
 
         function updateDistanceInfo(distanceData) {
             const distanceInfo = document.getElementById('distance-info');
-            if (distanceData && speechActive) {
+            // UPDATED: Only show distance info when within 1000 feet AND voice is active
+            if (distanceData && speechActive && distanceData.distance <= 1000) {
                 const distanceFeet = Math.round(distanceData.distance);
                 distanceInfo.textContent = `Next turn in ${distanceFeet} feet`;
                 distanceInfo.classList.remove('hidden');
@@ -390,6 +391,7 @@
                 
                 updateDistanceInfo(distanceData);
                 
+                // UPDATED: Trigger speech at 1000 feet instead of 300
                 if (distanceData.distance <= INSTRUCTION_TRIGGER_DISTANCE) {
                     speakText(distanceData.instruction);
                 }
